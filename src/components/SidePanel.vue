@@ -181,7 +181,7 @@ const weights = reactive({
 
 const weightKeys = computed(() => Object.keys(weights) as Array<keyof typeof weights>);
 
-const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'CityAccess+');
+const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
 
 const allCategories = computed(() => {
   if (!data.value.pois.length) {

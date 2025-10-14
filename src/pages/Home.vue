@@ -13,7 +13,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'CityAccess+ 南京');
+const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
 </script>
 
 <style scoped>
