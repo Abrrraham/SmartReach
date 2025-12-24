@@ -4,13 +4,13 @@
     <main class="page-about__content">
       <section class="about-section">
         <h2>数据来源</h2>
-        <p>基础设施数据来自公开开放的 OpenStreetMap 社区贡献以及南京市公开数据平台。</p>
+        <p>底图：高德地图（AMap）。地理编码：高德地理编码（AMap Web Service）。基础设施数据来自南京市公开数据平台。</p>
       </section>
       <section class="about-section">
         <h2>开源许可</h2>
         <p>
-          本项目基于 Vue 3 与 MapLibre 构建，遵循 MIT 许可证。地图瓦片遵循各自提供方的开放许可（如 OpenStreetMap
-          ODbL）。
+          本项目基于 Vue 3 与 MapLibre 构建，遵循 MIT 许可证。底图服务来自高德地图（AMap），路径/等时圈来自
+          OpenRouteService（若启用）。
         </p>
       </section>
       <section class="about-section">
