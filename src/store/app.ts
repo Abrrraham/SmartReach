@@ -11,6 +11,7 @@ import {
   type SitingWeights,
   type TravelProfile
 } from '../utils/spatial';
+import { normalizeCoordSys, type CoordSys } from '../utils/coord';
 import { isochrones as fetchIsochrones, directions as fetchDirections, matrix as fetchMatrix } from '../services/ors';
 
 interface MapState {
@@ -20,15 +21,24 @@ interface MapState {
 }
 
 interface FilterState {
-  categories: string[];
   travelMode: TravelProfile;
   times: number[];
 }
 
 interface DataState {
-  pois: POI[];
   poisInIsochrone: POI[];
   candidates: CandidateWithMetrics[];
+}
+
+interface PoiEngineState {
+  loading: boolean;
+  ready: boolean;
+  error?: string;
+  typeCounts: Record<string, number>;
+  selectedGroups: string[];
+  viewportPoiFC: FeatureCollection<Point, Record<string, unknown>>;
+  viewportPoints: POI[];
+  rulesMeta?: Record<string, unknown> | null;
 }
 
 interface AnalysisState {
@@ -37,21 +47,19 @@ interface AnalysisState {
   sitingWeights: SitingWeights;
 }
 
-const DEFAULT_CATEGORIES: FilterState['categories'] = [
-  'medical',
-  'pharmacy',
-  'market',
-  'supermarket',
-  'convenience',
-  'education',
-  'school',
-  'university',
-  'bus_stop',
-  'metro',
-  'charging',
-  'park',
-  'other'
-];
+const POI_URL = (import.meta.env.VITE_POI_URL as string | undefined) ?? '/data/nanjing_poi.json';
+const RULES_URL = '/data/type_rules.generated.json';
+const BASEMAP_PROVIDER = (
+  (import.meta.env.VITE_BASEMAP_PROVIDER as string | undefined) ?? 'amap'
+).toLowerCase();
+const MAP_COORD_SYS: CoordSys = normalizeCoordSys(
+  import.meta.env.VITE_COORD_SYS as string | undefined,
+  BASEMAP_PROVIDER === 'osm' ? 'WGS84' : 'GCJ02'
+);
+const POI_COORD_SYS: CoordSys = normalizeCoordSys(
+  import.meta.env.VITE_POI_COORD_SYS as string | undefined,
+  'WGS84'
+);
 
 const DEFAULT_CENTER = (() => {
   const raw = (import.meta.env.VITE_DEFAULT_CENTER as string | undefined) ?? '118.796,32.060';
@@ -80,15 +88,27 @@ export const useAppStore = defineStore('app', () => {
   });
 
   const filters = ref<FilterState>({
-    categories: [...DEFAULT_CATEGORIES],
     travelMode: 'foot-walking',
     times: [300, 600, 900]
   });
 
   const data = ref<DataState>({
-    pois: [],
     poisInIsochrone: [],
     candidates: []
+  });
+
+  const poiEngine = ref<PoiEngineState>({
+    loading: false,
+    ready: false,
+    error: undefined,
+    typeCounts: {},
+    selectedGroups: [],
+    viewportPoiFC: {
+      type: 'FeatureCollection',
+      features: []
+    },
+    viewportPoints: [],
+    rulesMeta: null
   });
 
   const analysis = ref<AnalysisState>({
@@ -98,34 +118,7 @@ export const useAppStore = defineStore('app', () => {
   });
 
   const nanjingBounds = computed(() => bboxOfNanjing());
-
-  const poisFeatureCollection = computed<FeatureCollection<Point>>(() => ({
-    type: 'FeatureCollection',
-    features: data.value.pois.map((poi) => ({
-      type: 'Feature',
-      geometry: {
-        type: 'Point',
-        coordinates: [poi.lon, poi.lat]
-      },
-      properties: { ...poi }
-    }))
-  }));
-
-  const filteredPois = computed(() => {
-    return data.value.pois.filter((poi) => filters.value.categories.includes(poi.category));
-  });
-
-  const filteredPoisFeatureCollection = computed<FeatureCollection<Point>>(() => ({
-    type: 'FeatureCollection',
-    features: filteredPois.value.map((poi) => ({
-      type: 'Feature',
-      geometry: {
-        type: 'Point',
-        coordinates: [poi.lon, poi.lat]
-      },
-      properties: { ...poi }
-    }))
-  }));
+  const visiblePoisInIsochrone = computed(() => data.value.poisInIsochrone);
 
   const topCandidates = computed(() => {
     return [...data.value.candidates]
@@ -134,35 +127,153 @@ export const useAppStore = defineStore('app', () => {
       .slice(0, 3);
   });
 
-  async function loadPois() {
-    try {
-      const response = await fetch('/data/nanjing_poi.geojson');
-      if (!response.ok) {
-        throw new Error(`加载 POI 失败: ${response.statusText}`);
-      }
-      const geojson = (await response.json()) as FeatureCollection<Point, Record<string, any>>;
-      data.value.pois = geojson.features
-        .map((feature, index) => {
-          if (!feature.geometry || feature.geometry.type !== 'Point') {
-            return undefined;
-          }
-          const props = feature.properties ?? {};
-          return {
-            id: props.id ?? `${index}`,
-            name: props.name ?? props.title ?? `POI-${index}`,
-            category: props.category ?? 'other',
-            subcategory: props.subcategory,
-            lon: feature.geometry.coordinates[0],
-            lat: feature.geometry.coordinates[1],
-            address: props.address,
-            score: props.score
-          } as POI;
-        })
-        .filter(Boolean) as POI[];
-    } catch (error) {
-      console.error('[appStore] 加载 POI 数据失败', error);
-      data.value.pois = [];
+  const emptyFeatureCollection: FeatureCollection<Point, Record<string, unknown>> = {
+    type: 'FeatureCollection',
+    features: []
+  };
+  let poiWorker: Worker | null = null;
+  let pendingViewport: { bbox: [number, number, number, number]; zoom: number } | null = null;
+  let lastViewport: { bbox: [number, number, number, number]; zoom: number } | null = null;
+  let lastRequestId = 0;
+
+  function extractViewportPoints(
+    collection: FeatureCollection<Point, Record<string, unknown>>
+  ): POI[] {
+    return collection.features
+      .map((feature) => {
+        const props = feature.properties ?? {};
+        if ((props as { cluster?: boolean }).cluster) {
+          return undefined;
+        }
+        if (!feature.geometry || feature.geometry.type !== 'Point') {
+          return undefined;
+        }
+        const [lon, lat] = feature.geometry.coordinates as [number, number];
+      return {
+        id: String((props as Record<string, unknown>).id ?? ''),
+        name: String((props as Record<string, unknown>).name ?? 'POI'),
+        type_group: String((props as Record<string, unknown>).type_group ?? 'other'),
+        lon,
+        lat
+      } as POI;
+    })
+      .filter(Boolean) as POI[];
+  }
+
+  function applyIsochroneFilter() {
+    if (analysis.value.isochrone) {
+      data.value.poisInIsochrone = withinIsochrone(
+        poiEngine.value.viewportPoints,
+        analysis.value.isochrone
+      );
+    } else {
+      data.value.poisInIsochrone = [];
     }
+  }
+
+  function initPoiEngine() {
+    if (poiWorker) {
+      return;
+    }
+    poiEngine.value.loading = true;
+    poiEngine.value.error = undefined;
+
+    poiWorker = new Worker(new URL('../workers/poi.worker.ts', import.meta.url), {
+      type: 'module'
+    });
+
+    poiWorker.onmessage = (event) => {
+      const { type, payload } = event.data as {
+        type: string;
+        payload: any;
+      };
+      if (type === 'INIT_DONE') {
+        poiEngine.value.ready = true;
+        poiEngine.value.typeCounts = payload.typeCounts ?? {};
+        poiEngine.value.rulesMeta = payload.rulesMeta ?? null;
+        poiEngine.value.error = undefined;
+        if (!poiEngine.value.selectedGroups.length) {
+          const sortedGroups = Object.entries(poiEngine.value.typeCounts)
+            .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+            .map(([group]) => group);
+          poiEngine.value.selectedGroups = sortedGroups.filter((group) => group !== 'address');
+        }
+        poiEngine.value.loading = true;
+        poiWorker?.postMessage({
+          type: 'BUILD_INDEX',
+          payload: { selectedGroups: poiEngine.value.selectedGroups }
+        });
+        return;
+      }
+      if (type === 'INDEX_READY') {
+        poiEngine.value.loading = false;
+        poiEngine.value.selectedGroups = payload.selectedGroups ?? poiEngine.value.selectedGroups;
+        if (pendingViewport) {
+          const { bbox, zoom } = pendingViewport;
+          pendingViewport = null;
+          requestViewportPois(bbox, zoom);
+        }
+        return;
+      }
+      if (type === 'QUERY_RESULT') {
+        if (payload.requestId !== lastRequestId) {
+          return;
+        }
+        poiEngine.value.viewportPoiFC = payload.fc ?? emptyFeatureCollection;
+        poiEngine.value.viewportPoints = extractViewportPoints(
+          poiEngine.value.viewportPoiFC
+        );
+        applyIsochroneFilter();
+        return;
+      }
+      if (type === 'ERROR') {
+        poiEngine.value.loading = false;
+        poiEngine.value.error = payload.message ?? 'POI 引擎错误';
+      }
+    };
+
+    poiWorker.postMessage({
+      type: 'INIT',
+      payload: {
+        poiUrl: POI_URL,
+        rulesUrl: RULES_URL,
+        coordSysConfig: {
+          poiCoordSys: POI_COORD_SYS,
+          mapCoordSys: MAP_COORD_SYS
+        }
+      }
+    });
+  }
+
+  function setSelectedGroups(groups: string[]) {
+    const unique = Array.from(new Set(groups)).filter(Boolean);
+    poiEngine.value.selectedGroups = unique;
+    poiEngine.value.loading = true;
+    poiEngine.value.viewportPoiFC = emptyFeatureCollection;
+    poiEngine.value.viewportPoints = [];
+    data.value.poisInIsochrone = [];
+    if (poiWorker && poiEngine.value.ready) {
+      poiWorker.postMessage({
+        type: 'BUILD_INDEX',
+        payload: { selectedGroups: unique }
+      });
+    }
+    if (lastViewport) {
+      requestViewportPois(lastViewport.bbox, lastViewport.zoom);
+    }
+  }
+
+  function requestViewportPois(bbox: [number, number, number, number], zoom: number) {
+    lastViewport = { bbox, zoom };
+    if (!poiWorker || !poiEngine.value.ready || poiEngine.value.loading) {
+      pendingViewport = { bbox, zoom };
+      return;
+    }
+    lastRequestId += 1;
+    poiWorker.postMessage({
+      type: 'QUERY',
+      payload: { bbox, zoom, requestId: lastRequestId }
+    });
   }
 
   function setMapCenter(center: [number, number], zoom?: number) {
@@ -174,16 +285,6 @@ export const useAppStore = defineStore('app', () => {
 
   function setMapStyleUrl(url?: string) {
     map.value.styleUrl = url;
-  }
-
-  function toggleCategory(category: string) {
-    const index = filters.value.categories.indexOf(category);
-    if (index >= 0) {
-      filters.value.categories.splice(index, 1);
-    } else {
-      filters.value.categories.push(category);
-    }
-    applyIsochroneFilter();
   }
 
   function setTravelMode(mode: TravelProfile) {
@@ -277,28 +378,20 @@ export const useAppStore = defineStore('app', () => {
     data.value.poisInIsochrone = [];
   }
 
-  function applyIsochroneFilter() {
-    if (analysis.value.isochrone) {
-      const hits = withinIsochrone(filteredPois.value, analysis.value.isochrone);
-      data.value.poisInIsochrone = hits;
-    } else {
-      data.value.poisInIsochrone = [];
-    }
-  }
-
   return {
     map,
     filters,
     data,
+    poiEngine,
     analysis,
     nanjingBounds,
-    poisFeatureCollection,
-    filteredPoisFeatureCollection,
+    visiblePoisInIsochrone,
     topCandidates,
-    loadPois,
+    initPoiEngine,
+    setSelectedGroups,
+    requestViewportPois,
     setMapCenter,
     setMapStyleUrl,
-    toggleCategory,
     setTravelMode,
     setTravelTimes,
     generateIsochrones,

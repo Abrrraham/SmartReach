@@ -1,4 +1,4 @@
-import { point, featureCollection, pointsWithinPolygon, distance as turfDistance } from '@turf/turf';
+import { point, featureCollection, pointsWithinPolygon, distance as turfDistance, bbox as turfBbox } from '@turf/turf';
 import type { FeatureCollection, Polygon, MultiPolygon } from 'geojson';
 import type { POI } from '../types/poi';
 
@@ -41,8 +41,18 @@ export function withinIsochrone(pois: POI[], isochrone?: FeatureCollection): POI
     return [];
   }
 
+  const [minX, minY, maxX, maxY] = turfBbox(
+    isochrone as FeatureCollection<Polygon | MultiPolygon>
+  );
+  const candidates = pois.filter(
+    (poi) => poi.lon >= minX && poi.lon <= maxX && poi.lat >= minY && poi.lat <= maxY
+  );
+  if (!candidates.length) {
+    return [];
+  }
+
   const poiFeatures = featureCollection(
-    pois.map((p) =>
+    candidates.map((p) =>
       point([p.lon, p.lat], {
         ...p
       })

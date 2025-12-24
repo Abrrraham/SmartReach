@@ -1,20 +1,8 @@
 export interface POI {
   id: string;
   name: string;
-  category:
-    | 'medical'
-    | 'pharmacy'
-    | 'market'
-    | 'supermarket'
-    | 'convenience'
-    | 'education'
-    | 'school'
-    | 'university'
-    | 'bus_stop'
-    | 'metro'
-    | 'charging'
-    | 'park'
-    | 'other';
+  type_group: string;
+  originalType?: string;
   subcategory?: string;
   lon: number;
   lat: number;

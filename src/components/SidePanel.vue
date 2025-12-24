@@ -30,18 +30,30 @@
         placeholder="MapLibre 样式 URL"
         @change="updateStyleUrl"
       />
-      <button type="button" class="button button--ghost" @click="clearStyleUrl">使用默认样式</button>
+      <button type="button" class="button button--ghost" @click="clearStyleUrl">
+        使用默认样式
+      </button>
 
-      <h3>POI 类别</h3>
+      <h3>POI 类型 (type_group)</h3>
+      <div class="button-group button-group--row">
+        <button type="button" class="button button--ghost" @click="selectAllGroups">全选</button>
+        <button type="button" class="button button--ghost" @click="clearGroups">清空</button>
+        <button type="button" class="button button--ghost" @click="invertGroups">反选</button>
+      </div>
+      <p v-if="poiEngine.loading" class="helper-text">正在重建索引...</p>
+      <p v-else-if="!selectedGroups.length" class="helper-text helper-text--warn">
+        未选择任何类型，POI 将不显示。
+      </p>
       <div class="checkbox-grid">
-        <label v-for="category in allCategories" :key="category" class="checkbox-item">
+        <label v-for="group in sortedGroups" :key="group.id" class="checkbox-item">
           <input
-            :checked="filters.categories.includes(category)"
+            :checked="selectedGroups.includes(group.id)"
             type="checkbox"
-            :value="category"
-            @change="toggleCategory(category)"
+            :value="group.id"
+            @change="toggleGroup(group.id)"
           />
-          <span>{{ translateCategory(category) }}</span>
+          <span>{{ group.label }}</span>
+          <span class="checkbox-item__count">{{ group.count }}</span>
         </label>
       </div>
     </section>
@@ -170,7 +182,7 @@ const selectedTimes = ref<number[]>([300, 600, 900]);
 const travelMode = ref<'foot-walking' | 'cycling-regular' | 'driving-car'>('foot-walking');
 
 const store = useAppStore();
-const { filters, map, analysis, data } = storeToRefs(store);
+const { filters, map, analysis, poiEngine } = storeToRefs(store);
 
 const weights = reactive({
   demand: analysis.value.sitingWeights.demand,
@@ -183,12 +195,34 @@ const weightKeys = computed(() => Object.keys(weights) as Array<keyof typeof wei
 
 const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
 
-const allCategories = computed(() => {
-  if (!data.value.pois.length) {
-    return filters.value.categories;
-  }
-  const fromData = Array.from(new Set(data.value.pois.map((poi) => poi.category)));
-  return Array.from(new Set([...fromData, ...filters.value.categories]));
+const GROUP_LABELS: Record<string, string> = {
+  food: '餐饮',
+  shopping: '购物',
+  life_service: '生活服务',
+  medical: '医疗健康',
+  education_culture: '科教文化',
+  transport: '交通出行',
+  lodging: '住宿',
+  finance: '金融',
+  government: '政府与社会组织',
+  company: '公司企业',
+  entertainment_sports: '文体娱乐',
+  tourism: '旅游景点',
+  public_facility: '公共设施',
+  residential_realestate: '住宅房产',
+  address: '地名地址',
+  other: '其他'
+};
+
+const selectedGroups = computed(() => poiEngine.value.selectedGroups);
+const sortedGroups = computed(() => {
+  return Object.entries(poiEngine.value.typeCounts)
+    .map(([id, count]) => ({
+      id,
+      count,
+      label: GROUP_LABELS[id] ?? id
+    }))
+    .sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
 });
 
 watch(
@@ -224,27 +258,28 @@ function clearStyleUrl() {
   updateStyleUrl();
 }
 
-function toggleCategory(category: string) {
-  store.toggleCategory(category);
+function toggleGroup(groupId: string) {
+  const current = new Set(poiEngine.value.selectedGroups);
+  if (current.has(groupId)) {
+    current.delete(groupId);
+  } else {
+    current.add(groupId);
+  }
+  store.setSelectedGroups(Array.from(current));
 }
 
-function translateCategory(category: string) {
-  const mapping: Record<string, string> = {
-    medical: '医疗',
-    pharmacy: '药店',
-    market: '市场',
-    supermarket: '超市',
-    convenience: '便利店',
-    education: '教育',
-    school: '学校',
-    university: '大学',
-    bus_stop: '公交站',
-    metro: '地铁',
-    charging: '充电',
-    park: '公园',
-    other: '其他'
-  };
-  return mapping[category] ?? category;
+function selectAllGroups() {
+  store.setSelectedGroups(sortedGroups.value.map((group) => group.id));
+}
+
+function clearGroups() {
+  store.setSelectedGroups([]);
+}
+
+function invertGroups() {
+  const current = new Set(poiEngine.value.selectedGroups);
+  const next = sortedGroups.value.map((group) => group.id).filter((id) => !current.has(id));
+  store.setSelectedGroups(next);
 }
 
 function toggleTime(value: number) {
@@ -411,10 +446,20 @@ function exportMapPng() {
   color: #343a40;
 }
 
+.checkbox-item__count {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: #868e96;
+}
+
 .helper-text {
   margin: 0;
   font-size: 0.85rem;
   color: #868e96;
+}
+
+.helper-text--warn {
+  color: #d9480f;
 }
 
 .slider-group {
@@ -441,6 +486,11 @@ function exportMapPng() {
   gap: 0.5rem;
 }
 
+.button-group--row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
 .fieldset {
   border: none;
   padding: 0;
@@ -450,3 +500,4 @@ function exportMapPng() {
   flex-wrap: wrap;
 }
 </style>
+

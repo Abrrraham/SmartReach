@@ -7,15 +7,26 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import maplibregl, { Map, GeoJSONSource, LngLatLike } from 'maplibre-gl';
-import MaplibreGeocoder from '@maplibre/maplibre-gl-geocoder';
+import MaplibreGeocoder, {
+  type CarmenGeojsonFeature,
+  type MaplibreGeocoderFeatureResults
+} from '@maplibre/maplibre-gl-geocoder';
 import { storeToRefs } from 'pinia';
 import type { FeatureCollection, LineString, Point } from 'geojson';
 import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
+import { buildAmapRasterStyle } from '../services/style';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import '@maplibre/maplibre-gl-geocoder/dist/maplibre-gl-geocoder.css';
 
-const FALLBACK_STYLE = {
+const BASEMAP_PROVIDER = (
+  (import.meta.env.VITE_BASEMAP_PROVIDER as string | undefined) ?? 'amap'
+).toLowerCase();
+const ENV_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL as string | undefined;
+const AMAP_KEY = (import.meta.env.VITE_AMAP_KEY as string | undefined) ?? '';
+const HAS_AMAP_KEY = AMAP_KEY.trim().length > 0;
+
+const OSM_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
     'osm-raster': {
@@ -34,6 +45,7 @@ const FALLBACK_STYLE = {
     }
   ]
 };
+const AMAP_STYLE: maplibregl.StyleSpecification = buildAmapRasterStyle();
 
 const POI_SOURCE_ID = 'pois';
 const ISOCHRONE_SOURCE_ID = 'isochrones';
@@ -47,10 +59,73 @@ const emit = defineEmits<{
 const mapContainer = ref<HTMLDivElement | null>(null);
 const mapInstance = ref<Map>();
 const store = useAppStore();
-const { map, nanjingBounds, filteredPoisFeatureCollection, analysis } = storeToRefs(store);
+const { map, nanjingBounds, analysis, poiEngine } = storeToRefs(store);
+const viewportDebounceMs = 120;
+let viewportTimer: number | null = null;
+let resizeObserver: ResizeObserver | null = null;
+let resizeRaf = 0;
 
-function buildInitialStyle() {
-  return map.value.styleUrl && map.value.styleUrl.length > 0 ? map.value.styleUrl : FALLBACK_STYLE;
+function scheduleViewportQuery() {
+  if (viewportTimer) {
+    window.clearTimeout(viewportTimer);
+  }
+  viewportTimer = window.setTimeout(() => {
+    const mapRef = mapInstance.value;
+    if (!mapRef) return;
+    const bounds = mapRef.getBounds();
+    const bbox: [number, number, number, number] = [
+      bounds.getWest(),
+      bounds.getSouth(),
+      bounds.getEast(),
+      bounds.getNorth()
+    ];
+    const zoom = Math.floor(mapRef.getZoom());
+    store.requestViewportPois(bbox, zoom);
+  }, viewportDebounceMs);
+}
+
+function resolveDefaultStyle(): maplibregl.StyleSpecification {
+  return BASEMAP_PROVIDER === 'osm' ? OSM_STYLE : AMAP_STYLE;
+}
+
+function scheduleMapResize() {
+  if (resizeRaf) {
+    cancelAnimationFrame(resizeRaf);
+  }
+  resizeRaf = requestAnimationFrame(() => {
+    mapInstance.value?.resize();
+    resizeRaf = 0;
+  });
+}
+
+function attachResizeObserver(target?: HTMLElement | null) {
+  if (!target) return;
+  resizeObserver = new ResizeObserver(() => {
+    scheduleMapResize();
+  });
+  resizeObserver.observe(target);
+  window.addEventListener('resize', scheduleMapResize);
+}
+
+function buildInitialStyle(): string | maplibregl.StyleSpecification {
+  return map.value.styleUrl && map.value.styleUrl.length > 0 ? map.value.styleUrl : resolveDefaultStyle();
+}
+
+function logBasemapConfig() {
+  const styleSource = map.value.styleUrl && map.value.styleUrl.length > 0
+    ? 'env_or_custom'
+    : BASEMAP_PROVIDER === 'osm'
+      ? 'osm_default'
+      : 'amap_default';
+  console.info('[map] basemap config', {
+    provider: BASEMAP_PROVIDER,
+    envStyleUrl: ENV_STYLE_URL ?? '(empty)',
+    hasAmapKey: HAS_AMAP_KEY,
+    styleSource
+  });
+  if (BASEMAP_PROVIDER !== 'osm' && !HAS_AMAP_KEY) {
+    console.warn('[map] VITE_AMAP_KEY missing; AMap tiles may fail to load.');
+  }
 }
 
 function ensurePoiLayers(map: Map) {
@@ -60,10 +135,7 @@ function ensurePoiLayers(map: Map) {
 
   map.addSource(POI_SOURCE_ID, {
     type: 'geojson',
-    data: filteredPoisFeatureCollection.value,
-    cluster: true,
-    clusterRadius: 40,
-    clusterMaxZoom: 14
+    data: poiEngine.value.viewportPoiFC
   });
 
   map.addLayer({
@@ -112,32 +184,38 @@ function ensurePoiLayers(map: Map) {
       'circle-stroke-color': '#ffffff',
       'circle-color': [
         'match',
-        ['get', 'category'],
-        'medical',
+        ['get', 'type_group'],
+        'food',
         '#e03131',
-        'pharmacy',
-        '#2f9e44',
-        'market',
-        '#f76707',
-        'supermarket',
-        '#20c997',
-        'convenience',
-        '#845ef7',
-        'education',
-        '#1c7ed6',
-        'school',
-        '#1c7ed6',
-        'university',
-        '#364fc7',
-        'bus_stop',
-        '#1098ad',
-        'metro',
-        '#0c8599',
-        'charging',
+        'shopping',
         '#12b886',
-        'park',
-        '#51cf66',
-        '#adb5bd'
+        'life_service',
+        '#f76707',
+        'medical',
+        '#d6336c',
+        'education_culture',
+        '#1c7ed6',
+        'transport',
+        '#1098ad',
+        'lodging',
+        '#845ef7',
+        'finance',
+        '#4c6ef5',
+        'government',
+        '#495057',
+        'company',
+        '#339af0',
+        'entertainment_sports',
+        '#f59f00',
+        'tourism',
+        '#2f9e44',
+        'public_facility',
+        '#adb5bd',
+        'residential_realestate',
+        '#5c7cfa',
+        'address',
+        '#ced4da',
+        '#868e96'
       ]
     }
   });
@@ -192,7 +270,7 @@ function ensureRouteLayer(map: Map) {
   }
 }
 
-function updatePoiSource(collection: FeatureCollection<Point>) {
+function updatePoiSource(collection: FeatureCollection<Point, Record<string, unknown>>) {
   const map = mapInstance.value;
   if (!map) return;
   const source = map.getSource(POI_SOURCE_ID) as GeoJSONSource | undefined;
@@ -233,6 +311,7 @@ function setRoute(feature?: GeoJSON.Feature<LineString>) {
 function setupMap() {
   if (!mapContainer.value) return;
 
+  logBasemapConfig();
   const mapInstanceLocal = new maplibregl.Map({
     container: mapContainer.value,
     style: buildInitialStyle(),
@@ -241,18 +320,44 @@ function setupMap() {
     maxBounds: nanjingBounds.value
   });
 
+  const resizeTarget = mapContainer.value?.parentElement ?? mapContainer.value;
+  attachResizeObserver(resizeTarget);
+
   mapInstanceLocal.addControl(new maplibregl.NavigationControl(), 'top-right');
 
   const geocoder = new MaplibreGeocoder(
     {
-      forwardGeocode: async (config) => {
-        if (!config.query) return { features: [] };
+      forwardGeocode: async (config): Promise<MaplibreGeocoderFeatureResults> => {
+        if (typeof config.query !== 'string') {
+          return { type: 'FeatureCollection', features: [] };
+        }
         const query = config.query.trim();
+        if (!query) {
+          return { type: 'FeatureCollection', features: [] };
+        }
         const response = await fetch(
           `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=geojson&limit=5`
         );
         const geo = (await response.json()) as FeatureCollection;
-        return geo;
+        const features = (geo.features ?? []).map((feature, index) => {
+          const props = (feature.properties ?? {}) as Record<string, unknown>;
+          const placeName =
+            String(props.display_name ?? props.name ?? query).trim() || query;
+          const text = String(props.name ?? placeName).trim() || query;
+          const bbox =
+            feature.bbox && feature.bbox.length >= 4
+              ? (feature.bbox.slice(0, 4) as [number, number, number, number])
+              : undefined;
+          return {
+            ...feature,
+            id: String((feature.id ?? props.id ?? index) ?? index),
+            text,
+            place_name: placeName,
+            place_type: ['place'],
+            bbox
+          } as CarmenGeojsonFeature;
+        });
+        return { type: 'FeatureCollection', features };
       }
     },
     {
@@ -268,7 +373,8 @@ function setupMap() {
     ensurePoiLayers(mapInstanceLocal);
     ensureIsochroneLayers(mapInstanceLocal);
     ensureRouteLayer(mapInstanceLocal);
-    updatePoiSource(filteredPoisFeatureCollection.value);
+    updatePoiSource(poiEngine.value.viewportPoiFC);
+    scheduleMapResize();
 
     if (analysis.value.isochrone) {
       setIsochrones(analysis.value.isochrone);
@@ -276,13 +382,41 @@ function setupMap() {
     if (analysis.value.route) {
       setRoute(analysis.value.route as GeoJSON.Feature<LineString>);
     }
+    scheduleViewportQuery();
   });
 
   mapInstanceLocal.on('click', 'poi-symbol', (event) => {
     if (!event.features?.length) return;
     const feature = event.features[0];
-    const poi = feature.properties as unknown as POI;
+    if (!feature.geometry || feature.geometry.type !== 'Point') {
+      return;
+    }
+    const [lon, lat] = feature.geometry.coordinates as [number, number];
+    const props = feature.properties as Record<string, unknown>;
+    const poi: POI = {
+      id: String(props.id ?? ''),
+      name: String(props.name ?? 'POI'),
+      type_group: String(props.type_group ?? 'other'),
+      originalType: props.originalType as string | undefined,
+      lon,
+      lat,
+      address: props.address as string | undefined
+    };
     emit('click-poi', poi);
+  });
+
+  mapInstanceLocal.on('click', 'poi-clusters', (event) => {
+    if (!event.features?.length) return;
+    const feature = event.features[0];
+    if (!feature.geometry || feature.geometry.type !== 'Point') {
+      return;
+    }
+    const [lng, lat] = feature.geometry.coordinates as [number, number];
+    const zoom = mapInstanceLocal.getZoom();
+    mapInstanceLocal.easeTo({
+      center: [lng, lat],
+      zoom: Math.min(zoom + 2, 18)
+    });
   });
 
   mapInstanceLocal.on('click', (event) => {
@@ -293,6 +427,11 @@ function setupMap() {
     const center = mapInstanceLocal.getCenter();
     const zoom = mapInstanceLocal.getZoom();
     store.setMapCenter([center.lng, center.lat], zoom);
+    scheduleViewportQuery();
+  });
+
+  mapInstanceLocal.on('zoomend', () => {
+    scheduleViewportQuery();
   });
 
   mapInstance.value = mapInstanceLocal;
@@ -303,6 +442,15 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+  window.removeEventListener('resize', scheduleMapResize);
+  if (resizeRaf) {
+    cancelAnimationFrame(resizeRaf);
+    resizeRaf = 0;
+  }
   mapInstance.value?.remove();
 });
 
@@ -311,29 +459,30 @@ watch(
   (styleUrl) => {
     const map = mapInstance.value;
     if (!map) return;
-    const style = styleUrl && styleUrl.length > 0 ? styleUrl : FALLBACK_STYLE;
+    const style = styleUrl && styleUrl.length > 0 ? styleUrl : resolveDefaultStyle();
     map.setStyle(style);
     map.once('styledata', () => {
       ensurePoiLayers(map);
       ensureIsochroneLayers(map);
       ensureRouteLayer(map);
-      updatePoiSource(filteredPoisFeatureCollection.value);
+      updatePoiSource(poiEngine.value.viewportPoiFC);
+      scheduleMapResize();
       if (analysis.value.isochrone) {
         setIsochrones(analysis.value.isochrone);
       }
       if (analysis.value.route) {
         setRoute(analysis.value.route as GeoJSON.Feature<LineString>);
       }
+      scheduleViewportQuery();
     });
   }
 );
 
 watch(
-  filteredPoisFeatureCollection,
+  () => poiEngine.value.viewportPoiFC,
   (collection) => {
     updatePoiSource(collection);
-  },
-  { deep: true }
+  }
 );
 
 watch(

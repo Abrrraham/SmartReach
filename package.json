@@ -7,8 +7,10 @@
     "dev": "vite --host",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest",
-    "test:watch": "vitest --watch"
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest --watch",
+    "check": "npm run build && npm run test",
+    "type:report": "node scripts/type_report.mjs"
   },
   "dependencies": {
     "@maplibre/maplibre-gl-geocoder": "^1.4.0",
@@ -17,8 +19,10 @@
     "file-saver": "^2.0.5",
     "maplibre-gl": "^5.0.0",
     "pinia": "^2.1.7",
+    "supercluster": "^8.0.1",
     "vue": "^3.4.21",
-    "vue-router": "^4.5.1"
+    "vue-router": "^4.5.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/geojson": "^7946.0.14",

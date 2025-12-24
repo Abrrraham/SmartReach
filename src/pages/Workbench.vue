@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="workbench">
     <HeaderBar />
     <div class="workbench__body">
@@ -36,7 +36,7 @@ const mapViewRef = ref<InstanceType<typeof MapView> | null>(null);
 const lastOrigin = ref<[number, number] | null>(null);
 
 const store = useAppStore();
-const { data, filters } = storeToRefs(store);
+const { data, filters, visiblePoisInIsochrone } = storeToRefs(store);
 
 function handleMapClick(coordinates: [number, number]) {
   lastOrigin.value = coordinates;
@@ -58,14 +58,14 @@ function handlePoiClick(poi: POI) {
 
 function exportPoiCsv() {
   const rows = [
-    ['id', 'name', 'category', 'lon', 'lat', 'address'].join(',')
+    ['id', 'name', 'type_group', 'lon', 'lat', 'address'].join(',')
   ];
-  data.value.poisInIsochrone.forEach((poi) => {
+  visiblePoisInIsochrone.value.forEach((poi) => {
     rows.push(
       [
         poi.id,
         poi.name,
-        poi.category,
+        poi.type_group,
         poi.lon.toFixed(6),
         poi.lat.toFixed(6),
         poi.address ?? ''
@@ -78,13 +78,13 @@ function exportPoiCsv() {
 }
 
 function exportCandidateCsv() {
-  const rows = [['id', 'name', 'category', 'lon', 'lat', 'score'].join(',')];
+  const rows = [['id', 'name', 'type_group', 'lon', 'lat', 'score'].join(',')];
   data.value.candidates.forEach((candidate) => {
     rows.push(
       [
         candidate.id,
         candidate.name,
-        candidate.category,
+        candidate.type_group,
         candidate.lon.toFixed(6),
         candidate.lat.toFixed(6),
         candidate.score ?? ''
@@ -110,7 +110,7 @@ function exportMapPng() {
   const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
     now.getDate()
   ).padStart(2, '0')}`;
-  const city = (import.meta.env.VITE_DEFAULT_CITY as string) ?? '南京市';
+  const city = (import.meta.env.VITE_DEFAULT_CITY as string | undefined) || '南京市';
   saveAs(blob, `${city}-map-${date}.png`);
 }
 
@@ -124,7 +124,7 @@ function handleUpload(payload: { type: 'geojson' | 'csv'; data: any }) {
     store.addCandidate({
       id: props.id ?? `candidate-${index}`,
       name: props.name ?? `候选点-${index}`,
-      category: props.category ?? 'other',
+      type_group: props.type_group ?? props.category ?? 'other',
       lon: feature.geometry.coordinates[0],
       lat: feature.geometry.coordinates[1],
       address: props.address,
@@ -138,18 +138,22 @@ function handleUpload(payload: { type: 'geojson' | 'csv'; data: any }) {
 .workbench {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  min-height: 100vh;
 }
 
 .workbench__body {
   flex: 1 1 auto;
   display: grid;
   grid-template-columns: auto 1fr auto;
+  height: 100%;
   min-height: 0;
 }
 
 .workbench__map {
   position: relative;
+  height: 100%;
   min-height: 0;
 }
 </style>
+

@@ -11,6 +11,6 @@ import { useAppStore } from './store/app';
 const store = useAppStore();
 
 onMounted(() => {
-  store.loadPois();
+  store.initPoiEngine();
 });
 </script>

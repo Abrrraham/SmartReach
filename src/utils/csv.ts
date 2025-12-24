@@ -5,7 +5,7 @@ export interface CsvMapping {
   lonKey: string;
   latKey: string;
   nameKey: string;
-  categoryKey: string;
+  typeKey: string;
   idKey?: string;
   addressKey?: string;
   subcategoryKey?: string;
@@ -48,10 +48,12 @@ export function csvToGeoJSON(text: string, mapping: CsvMapping): FeatureCollecti
         return undefined;
       }
 
+      const rawType = record[mapping.typeKey];
       const poi: POI = {
         id: record[mapping.idKey ?? 'id'] || `${index}`,
         name: record[mapping.nameKey] || `POI-${index}`,
-        category: (record[mapping.categoryKey] as POI['category']) ?? 'other',
+        type_group: rawType?.trim() ? rawType.trim() : 'other',
+        originalType: rawType?.trim() ? rawType.trim() : undefined,
         lon,
         lat,
         address: mapping.addressKey ? record[mapping.addressKey] : undefined,

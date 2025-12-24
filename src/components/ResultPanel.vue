@@ -4,10 +4,10 @@
       <header class="result-section__header">
         <h3>等时圈统计</h3>
         <span v-if="analysis.isochrone" class="badge">已生成</span>
-        <span v-else class="badge badge--muted">待生成</span>
+        <span v-else class="badge badge--muted">未生成</span>
       </header>
       <ul class="stat-list">
-        <li v-for="item in categoryStats" :key="item.category" class="stat-list__item">
+        <li v-for="item in typeStats" :key="item.type_group" class="stat-list__item">
           <span class="stat-list__label">{{ item.label }}</span>
           <span class="stat-list__value">{{ item.count }}</span>
         </li>
@@ -16,35 +16,49 @@
 
     <section class="result-section">
       <header class="result-section__header">
-        <h3>圈内设施</h3>
-        <span class="result-section__meta">{{ poisInIsochrone.length }} 项</span>
+        <h3>圈内 POI</h3>
+        <span class="result-section__meta">{{ visiblePoisInIsochrone.length }} 条</span>
       </header>
-      <ul class="poi-list" aria-label="圈内设施列表">
-        <li v-for="poi in poisInIsochrone" :key="poi.id" class="poi-list__item">
-          <div class="poi-list__info">
-            <strong>{{ poi.name }}</strong>
-            <span class="poi-list__meta">{{ translateCategory(poi.category) }}</span>
-          </div>
-          <button type="button" class="button button--link" @click="navigateToPoi(poi)">
-            导航
-          </button>
-        </li>
-      </ul>
+      <p v-if="!analysis.isochrone" class="helper-text">请先生成等时圈查看结果。</p>
+      <p v-else-if="!visiblePoisInIsochrone.length" class="helper-text">
+        当前筛选无结果。
+      </p>
+      <template v-else>
+        <ul class="poi-list" aria-label="圈内 POI 列表">
+          <li v-for="poi in pagedPois" :key="poi.id" class="poi-list__item">
+            <div class="poi-list__info">
+              <strong>{{ poi.name }}</strong>
+              <span class="poi-list__meta">{{ formatTypeGroup(poi.type_group) }}</span>
+            </div>
+            <button type="button" class="button button--link" @click="navigateToPoi(poi)">
+              路径
+            </button>
+          </li>
+        </ul>
+        <button
+          v-if="canLoadMore"
+          type="button"
+          class="button button--ghost"
+          @click="loadMorePois"
+        >
+          查看更多
+        </button>
+      </template>
     </section>
 
     <section class="result-section">
       <header class="result-section__header">
-        <h3>智能选址 Top 3</h3>
+        <h3>候选点 Top 3</h3>
         <span class="result-section__meta">{{ topCandidates.length }} 项</span>
       </header>
       <ul class="candidate-list" aria-label="候选评分列表">
         <li v-for="candidate in topCandidates" :key="candidate.id" class="candidate-card">
           <div class="candidate-card__header">
             <strong>{{ candidate.name }}</strong>
-            <span class="candidate-card__score">{{ candidate.score ?? '—' }}</span>
+            <span class="candidate-card__score">{{ candidate.score ?? '?' }}</span>
           </div>
           <div class="candidate-card__body">
-            <span class="candidate-card__category">{{ translateCategory(candidate.category) }}</span>
+            <span class="candidate-card__category">{{ formatTypeGroup(candidate.type_group) }}</span>
             <div class="candidate-card__chart-placeholder" role="img" aria-label="雷达图占位">
               雷达图占位
             </div>
@@ -61,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
@@ -71,40 +85,62 @@ const emit = defineEmits<{
 }>();
 
 const store = useAppStore();
-const { data, analysis, topCandidates } = storeToRefs(store);
+const { analysis, topCandidates, visiblePoisInIsochrone } = storeToRefs(store);
 
-const poisInIsochrone = computed(() => data.value.poisInIsochrone);
+const page = ref(1);
+const pageSize = 200;
+const pagedPois = computed(() =>
+  visiblePoisInIsochrone.value.slice(0, page.value * pageSize)
+);
+const canLoadMore = computed(
+  () => pagedPois.value.length < visiblePoisInIsochrone.value.length
+);
 
-const categoryStats = computed(() => {
+watch(
+  visiblePoisInIsochrone,
+  () => {
+    page.value = 1;
+  },
+  { deep: true }
+);
+
+const typeStats = computed(() => {
   const stats = new Map<string, number>();
-  poisInIsochrone.value.forEach((poi) => {
-    stats.set(poi.category, (stats.get(poi.category) ?? 0) + 1);
+  visiblePoisInIsochrone.value.forEach((poi) => {
+    stats.set(poi.type_group, (stats.get(poi.type_group) ?? 0) + 1);
   });
 
-  return Array.from(stats.entries()).map(([category, count]) => ({
-    category,
-    label: translateCategory(category),
+  return Array.from(stats.entries()).map(([type_group, count]) => ({
+    type_group,
+    label: formatTypeGroup(type_group),
     count
   }));
 });
 
-function translateCategory(category: string) {
+function formatTypeGroup(typeGroup: string) {
   const mapping: Record<string, string> = {
-    medical: '医疗',
-    pharmacy: '药店',
-    market: '市场',
-    supermarket: '超市',
-    convenience: '便利店',
-    education: '教育',
-    school: '学校',
-    university: '大学',
-    bus_stop: '公交站',
-    metro: '地铁',
-    charging: '充电站',
-    park: '公园',
+    food: '餐饮',
+    shopping: '购物',
+    life_service: '生活服务',
+    medical: '医疗健康',
+    education_culture: '科教文化',
+    transport: '交通出行',
+    lodging: '住宿',
+    finance: '金融',
+    government: '政府与社会组织',
+    company: '公司企业',
+    entertainment_sports: '文体娱乐',
+    tourism: '旅游景点',
+    public_facility: '公共设施',
+    residential_realestate: '住宅房产',
+    address: '地名地址',
     other: '其他'
   };
-  return mapping[category] ?? category;
+  return mapping[typeGroup] ?? typeGroup;
+}
+
+function loadMorePois() {
+  page.value += 1;
 }
 
 function navigateToPoi(poi: POI) {
@@ -140,6 +176,12 @@ function navigateToPoi(poi: POI) {
 .result-section__meta {
   color: #868e96;
   font-size: 0.85rem;
+}
+
+.helper-text {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #868e96;
 }
 
 .stat-list {

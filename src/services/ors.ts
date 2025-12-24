@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { buffer, lineString, point, featureCollection, distance as turfDistance } from '@turf/turf';
-import type { Feature, FeatureCollection, LineString } from 'geojson';
+import type { Feature, FeatureCollection, LineString, MultiPolygon, Polygon } from 'geojson';
 import type { TravelProfile } from '../utils/spatial';
 
 interface IsochroneParams {
@@ -131,27 +131,31 @@ export async function matrix(params: MatrixParams): Promise<MatrixResponseShape>
 function localIsochrones({ lon, lat, profile, ranges }: IsochroneParams): FeatureCollection {
   const speed = SPEED_LUT[profile];
   const origin = point([lon, lat]);
-  const polygons = ranges.map((rangeSeconds) => {
+  const polygons = ranges
+    .map((rangeSeconds) => {
     const distanceKm = (speed * rangeSeconds) / 3600;
     const buffered = buffer(origin, distanceKm, { units: 'kilometers' });
+    if (!buffered) {
+      return undefined;
+    }
     buffered.properties = {
       contour: rangeSeconds,
       areaKm2: Math.PI * distanceKm * distanceKm
     };
     return buffered;
-  });
+  })
+    .filter((feature): feature is Feature<Polygon | MultiPolygon> => Boolean(feature));
 
   return featureCollection(polygons);
 }
 
 function localDirections({ start, end, profile }: DirectionsParams): Feature<LineString> {
   const speed = SPEED_LUT[profile];
-  const line = lineString([start, end], {
-    profile,
-    mode: 'fallback'
-  });
+  const line = lineString([start, end]);
   const km = turfDistance(point(start), point(end), { units: 'kilometers' });
   line.properties = {
+    profile,
+    mode: 'fallback',
     distance: km * 1000,
     duration: (km / speed) * 3600,
     summary: {

@@ -54,7 +54,7 @@ async function submit() {
       lonKey: 'lon',
       latKey: 'lat',
       nameKey: 'name',
-      categoryKey: 'category'
+      typeKey: 'type_group'
     });
     emit('submit', { type: 'csv', data: geojson });
   } else {
