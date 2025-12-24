@@ -1,0 +1,7 @@
+dist/
+node_modules/
+node_modules/.vite/
+node_modules/.vue-global-types/
+public/data/nanjing_poi.*
+public/data/type_rules.generated.json
+public/data/type_coverage_report.md
