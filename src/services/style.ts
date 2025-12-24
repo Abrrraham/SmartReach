@@ -21,6 +21,7 @@ export function getCategoryColor(category: string): string {
 export function buildAmapRasterStyle(): StyleSpecification {
   return {
     version: 8,
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     sources: {
       'amap-raster': {
         type: 'raster',

@@ -1,6 +1,6 @@
-import { computed, ref } from 'vue';
+import { computed, ref, watchEffect } from 'vue';
 import { defineStore } from 'pinia';
-import type { FeatureCollection, Point } from 'geojson';
+import type { FeatureCollection, Point, Polygon } from 'geojson';
 import type { POI } from '../types/poi';
 import {
   bboxOfNanjing,
@@ -31,14 +31,23 @@ interface DataState {
 }
 
 interface PoiEngineState {
-  loading: boolean;
+  loadingPois: boolean;
+  buildingIndex: boolean;
+  queryLoading: boolean;
   ready: boolean;
+  mapReady: boolean;
+  indexReady: boolean;
+  initialRendered: boolean;
+  showClusterExtent: boolean;
   error?: string;
   typeCounts: Record<string, number>;
   selectedGroups: string[];
-  viewportPoiFC: FeatureCollection<Point, Record<string, unknown>>;
+  poiByGroup: Record<string, FeatureCollection<Point, Record<string, unknown>>>;
+  hullByGroup: Record<string, FeatureCollection<Polygon, Record<string, unknown>>>;
   viewportPoints: POI[];
   rulesMeta?: Record<string, unknown> | null;
+  lastViewport?: { bbox: [number, number, number, number]; zoom: number } | null;
+  pendingViewport?: { bbox: [number, number, number, number]; zoom: number } | null;
 }
 
 interface AnalysisState {
@@ -98,17 +107,23 @@ export const useAppStore = defineStore('app', () => {
   });
 
   const poiEngine = ref<PoiEngineState>({
-    loading: false,
+    loadingPois: false,
+    buildingIndex: false,
+    queryLoading: false,
     ready: false,
+    mapReady: false,
+    indexReady: false,
+    initialRendered: false,
+    showClusterExtent: false,
     error: undefined,
     typeCounts: {},
     selectedGroups: [],
-    viewportPoiFC: {
-      type: 'FeatureCollection',
-      features: []
-    },
+    poiByGroup: {},
+    hullByGroup: {},
     viewportPoints: [],
-    rulesMeta: null
+    rulesMeta: null,
+    lastViewport: null,
+    pendingViewport: null
   });
 
   const analysis = ref<AnalysisState>({
@@ -127,37 +142,58 @@ export const useAppStore = defineStore('app', () => {
       .slice(0, 3);
   });
 
-  const emptyFeatureCollection: FeatureCollection<Point, Record<string, unknown>> = {
+  const emptyPointCollection: FeatureCollection<Point, Record<string, unknown>> = {
     type: 'FeatureCollection',
     features: []
   };
+  const emptyPolygonCollection: FeatureCollection<Polygon, Record<string, unknown>> = {
+    type: 'FeatureCollection',
+    features: []
+  };
+  const DEV_LOG = import.meta.env.DEV;
+  const logPoi = (message: string, payload?: Record<string, unknown>) => {
+    if (!DEV_LOG) return;
+    console.info('[poi-engine]', message, payload ?? {});
+  };
+  const toPlainBbox = (
+    bbox: [number, number, number, number]
+  ): [number, number, number, number] => [
+    Number(bbox[0]),
+    Number(bbox[1]),
+    Number(bbox[2]),
+    Number(bbox[3])
+  ];
+  const toPlainGroups = (groups: string[]): string[] =>
+    Array.from(groups ?? []).map((group) => String(group));
   let poiWorker: Worker | null = null;
-  let pendingViewport: { bbox: [number, number, number, number]; zoom: number } | null = null;
-  let lastViewport: { bbox: [number, number, number, number]; zoom: number } | null = null;
   let lastRequestId = 0;
+  let expandRequestId = 0;
+  const pendingExpand = new Map<number, (zoom: number | null) => void>();
 
   function extractViewportPoints(
-    collection: FeatureCollection<Point, Record<string, unknown>>
+    grouped: Record<string, FeatureCollection<Point, Record<string, unknown>>>
   ): POI[] {
-    return collection.features
-      .map((feature) => {
+    const points: POI[] = [];
+    Object.values(grouped).forEach((collection) => {
+      collection.features.forEach((feature) => {
         const props = feature.properties ?? {};
         if ((props as { cluster?: boolean }).cluster) {
-          return undefined;
+          return;
         }
         if (!feature.geometry || feature.geometry.type !== 'Point') {
-          return undefined;
+          return;
         }
         const [lon, lat] = feature.geometry.coordinates as [number, number];
-      return {
-        id: String((props as Record<string, unknown>).id ?? ''),
-        name: String((props as Record<string, unknown>).name ?? 'POI'),
-        type_group: String((props as Record<string, unknown>).type_group ?? 'other'),
-        lon,
-        lat
-      } as POI;
-    })
-      .filter(Boolean) as POI[];
+        points.push({
+          id: String((props as Record<string, unknown>).id ?? ''),
+          name: String((props as Record<string, unknown>).name ?? 'POI'),
+          type_group: String((props as Record<string, unknown>).type_group ?? 'other'),
+          lon,
+          lat
+        });
+      });
+    });
+    return points;
   }
 
   function applyIsochroneFilter() {
@@ -175,8 +211,12 @@ export const useAppStore = defineStore('app', () => {
     if (poiWorker) {
       return;
     }
-    poiEngine.value.loading = true;
+    poiEngine.value.loadingPois = true;
+    poiEngine.value.buildingIndex = false;
+    poiEngine.value.queryLoading = false;
     poiEngine.value.error = undefined;
+    poiEngine.value.indexReady = false;
+    poiEngine.value.initialRendered = false;
 
     poiWorker = new Worker(new URL('../workers/poi.worker.ts', import.meta.url), {
       type: 'module'
@@ -189,29 +229,34 @@ export const useAppStore = defineStore('app', () => {
       };
       if (type === 'INIT_DONE') {
         poiEngine.value.ready = true;
-        poiEngine.value.typeCounts = payload.typeCounts ?? {};
+        poiEngine.value.loadingPois = false;
+        poiEngine.value.typeCounts = { ...(payload.typeCounts ?? {}) };
+        if ('address' in poiEngine.value.typeCounts) {
+          delete poiEngine.value.typeCounts.address;
+        }
         poiEngine.value.rulesMeta = payload.rulesMeta ?? null;
         poiEngine.value.error = undefined;
-        if (!poiEngine.value.selectedGroups.length) {
-          const sortedGroups = Object.entries(poiEngine.value.typeCounts)
-            .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
-            .map(([group]) => group);
-          poiEngine.value.selectedGroups = sortedGroups.filter((group) => group !== 'address');
-        }
-        poiEngine.value.loading = true;
-        poiWorker?.postMessage({
-          type: 'BUILD_INDEX',
-          payload: { selectedGroups: poiEngine.value.selectedGroups }
+        poiEngine.value.selectedGroups = [];
+        poiEngine.value.buildingIndex = false;
+        poiEngine.value.queryLoading = false;
+        poiEngine.value.indexReady = false;
+        poiEngine.value.poiByGroup = {};
+        poiEngine.value.hullByGroup = {};
+        logPoi('init_done', {
+          groups: Object.keys(poiEngine.value.typeCounts).length,
+          total: payload.total ?? 0
         });
         return;
       }
       if (type === 'INDEX_READY') {
-        poiEngine.value.loading = false;
-        poiEngine.value.selectedGroups = payload.selectedGroups ?? poiEngine.value.selectedGroups;
-        if (pendingViewport) {
-          const { bbox, zoom } = pendingViewport;
-          pendingViewport = null;
-          requestViewportPois(bbox, zoom);
+        poiEngine.value.buildingIndex = false;
+        poiEngine.value.indexReady = true;
+        poiEngine.value.queryLoading = false;
+        logPoi('index_ready', {
+          groups: payload?.groups ?? poiEngine.value.selectedGroups
+        });
+        if (poiEngine.value.pendingViewport || !poiEngine.value.initialRendered) {
+          maybeRequestInitialViewport();
         }
         return;
       }
@@ -219,15 +264,42 @@ export const useAppStore = defineStore('app', () => {
         if (payload.requestId !== lastRequestId) {
           return;
         }
-        poiEngine.value.viewportPoiFC = payload.fc ?? emptyFeatureCollection;
-        poiEngine.value.viewportPoints = extractViewportPoints(
-          poiEngine.value.viewportPoiFC
-        );
+        const results = payload.results ?? {};
+        const selected = new Set(poiEngine.value.selectedGroups);
+        const nextPoiByGroup: Record<string, FeatureCollection<Point, Record<string, unknown>>> = {};
+        const nextHullByGroup: Record<string, FeatureCollection<Polygon, Record<string, unknown>>> = {};
+        selected.forEach((group) => {
+          const entry = results[group];
+          nextPoiByGroup[group] = entry?.points ?? emptyPointCollection;
+          nextHullByGroup[group] = entry?.hulls ?? emptyPolygonCollection;
+        });
+        poiEngine.value.poiByGroup = nextPoiByGroup;
+        poiEngine.value.hullByGroup = nextHullByGroup;
+        poiEngine.value.viewportPoints = extractViewportPoints(nextPoiByGroup);
+        poiEngine.value.queryLoading = false;
         applyIsochroneFilter();
+        logPoi('query_result', {
+          requestId: payload.requestId,
+          groups: Object.keys(nextPoiByGroup).length,
+          points: poiEngine.value.viewportPoints.length
+        });
+        return;
+      }
+      if (type === 'EXPAND_RESULT') {
+        const resolver = pendingExpand.get(payload.requestId);
+        if (resolver) {
+          resolver(typeof payload.zoom === 'number' ? payload.zoom : null);
+          pendingExpand.delete(payload.requestId);
+        }
         return;
       }
       if (type === 'ERROR') {
-        poiEngine.value.loading = false;
+        poiEngine.value.loadingPois = false;
+        poiEngine.value.buildingIndex = false;
+        poiEngine.value.queryLoading = false;
+        poiEngine.value.indexReady = false;
+        pendingExpand.forEach((resolve) => resolve(null));
+        pendingExpand.clear();
         poiEngine.value.error = payload.message ?? 'POI 引擎错误';
       }
     };
@@ -245,34 +317,146 @@ export const useAppStore = defineStore('app', () => {
     });
   }
 
-  function setSelectedGroups(groups: string[]) {
-    const unique = Array.from(new Set(groups)).filter(Boolean);
-    poiEngine.value.selectedGroups = unique;
-    poiEngine.value.loading = true;
-    poiEngine.value.viewportPoiFC = emptyFeatureCollection;
-    poiEngine.value.viewportPoints = [];
-    data.value.poisInIsochrone = [];
-    if (poiWorker && poiEngine.value.ready) {
-      poiWorker.postMessage({
-        type: 'BUILD_INDEX',
-        payload: { selectedGroups: unique }
-      });
-    }
-    if (lastViewport) {
-      requestViewportPois(lastViewport.bbox, lastViewport.zoom);
+  function setMapReady(ready: boolean) {
+    poiEngine.value.mapReady = ready;
+    logPoi('map_ready', { ready });
+    if (ready) {
+      maybeRequestInitialViewport();
     }
   }
 
-  function requestViewportPois(bbox: [number, number, number, number], zoom: number) {
-    lastViewport = { bbox, zoom };
-    if (!poiWorker || !poiEngine.value.ready || poiEngine.value.loading) {
-      pendingViewport = { bbox, zoom };
+  function maybeRequestInitialViewport() {
+    if (!poiWorker || !poiEngine.value.ready) return;
+    if (!poiEngine.value.mapReady || !poiEngine.value.indexReady) return;
+    if (!poiEngine.value.selectedGroups.length) return;
+    if (poiEngine.value.buildingIndex) return;
+    const viewport = poiEngine.value.pendingViewport ?? poiEngine.value.lastViewport;
+    if (!viewport) return;
+    requestViewportPois(viewport.bbox, viewport.zoom);
+  }
+
+  function updateViewport(bbox: [number, number, number, number], zoom: number) {
+    const viewport = { bbox: toPlainBbox(bbox), zoom: Number(zoom) };
+    poiEngine.value.lastViewport = viewport;
+    if (!poiEngine.value.initialRendered) {
+      poiEngine.value.pendingViewport = viewport;
+    }
+  }
+
+  function setSelectedGroups(groups: string[]) {
+    const unique = Array.from(new Set(toPlainGroups(groups)))
+      .filter((group) => Boolean(group) && group !== 'address');
+    poiEngine.value.selectedGroups = unique;
+    poiEngine.value.initialRendered = false;
+    logPoi('set_selected', { groups: unique });
+    if (!unique.length) {
+      poiEngine.value.buildingIndex = false;
+      poiEngine.value.indexReady = false;
+      poiEngine.value.queryLoading = false;
+      poiEngine.value.pendingViewport = null;
+      poiEngine.value.poiByGroup = {};
+      poiEngine.value.hullByGroup = {};
+      poiEngine.value.viewportPoints = [];
+      data.value.poisInIsochrone = [];
       return;
     }
+    poiEngine.value.indexReady = false;
+    if (poiWorker && poiEngine.value.ready) {
+      poiEngine.value.buildingIndex = true;
+      const groupsPlain = toPlainGroups(unique);
+      poiWorker.postMessage({
+        type: 'BUILD_INDEX',
+        payload: { groups: groupsPlain }
+      });
+      logPoi('build_index', { groups: groupsPlain });
+    } else {
+      poiEngine.value.buildingIndex = false;
+    }
+    if (poiEngine.value.lastViewport) {
+      requestViewportPois(
+        poiEngine.value.lastViewport.bbox,
+        poiEngine.value.lastViewport.zoom
+      );
+    }
+  }
+
+  function requestViewportPois(
+    bbox: [number, number, number, number],
+    zoom: number
+  ): boolean {
+    const bboxPlain = toPlainBbox(bbox);
+    const zoomPlain = Number(zoom);
+    const viewport = { bbox: bboxPlain, zoom: zoomPlain };
+    poiEngine.value.lastViewport = viewport;
+    if (!poiEngine.value.selectedGroups.length) {
+      poiEngine.value.pendingViewport = viewport;
+      poiEngine.value.poiByGroup = {};
+      poiEngine.value.hullByGroup = {};
+      poiEngine.value.viewportPoints = [];
+      data.value.poisInIsochrone = [];
+      logPoi('query_skip_empty', { bbox: bboxPlain, zoom: zoomPlain });
+      return false;
+    }
+    if (
+      !poiWorker ||
+      !poiEngine.value.ready ||
+      !poiEngine.value.mapReady ||
+      !poiEngine.value.indexReady ||
+      poiEngine.value.buildingIndex
+    ) {
+      poiEngine.value.pendingViewport = viewport;
+      const groupsPlain = toPlainGroups(poiEngine.value.selectedGroups);
+      logPoi('query_pending', {
+        bbox: bboxPlain,
+        zoom: zoomPlain,
+        ready: poiEngine.value.ready,
+        mapReady: poiEngine.value.mapReady,
+        indexReady: poiEngine.value.indexReady,
+        buildingIndex: poiEngine.value.buildingIndex,
+        groups: groupsPlain.length
+      });
+      return false;
+    }
     lastRequestId += 1;
+    poiEngine.value.pendingViewport = null;
+    poiEngine.value.queryLoading = true;
+    const groupsPlain = toPlainGroups(poiEngine.value.selectedGroups);
+    const includeHull = poiEngine.value.showClusterExtent;
+    logPoi('query_send', {
+      requestId: lastRequestId,
+      bbox: bboxPlain,
+      zoom: zoomPlain,
+      groups: groupsPlain,
+      includeHull
+    });
     poiWorker.postMessage({
       type: 'QUERY',
-      payload: { bbox, zoom, requestId: lastRequestId }
+      payload: {
+        bbox: bboxPlain,
+        zoom: zoomPlain,
+        groups: groupsPlain,
+        includeHull,
+        requestId: lastRequestId
+      }
+    });
+    if (!poiEngine.value.initialRendered) {
+      poiEngine.value.initialRendered = true;
+    }
+    return true;
+  }
+
+  function expandCluster(group: string, clusterId: number): Promise<number | null> {
+    if (!poiWorker) {
+      return Promise.resolve(null);
+    }
+    expandRequestId += 1;
+    const requestId = expandRequestId;
+    return new Promise((resolve) => {
+      pendingExpand.set(requestId, resolve);
+      poiWorker?.postMessage({
+        type: 'EXPAND',
+        payload: { group, clusterId, requestId }
+      });
     });
   }
 
@@ -286,6 +470,26 @@ export const useAppStore = defineStore('app', () => {
   function setMapStyleUrl(url?: string) {
     map.value.styleUrl = url;
   }
+
+  watchEffect(() => {
+    if (poiEngine.value.initialRendered) {
+      return;
+    }
+    if (!poiEngine.value.mapReady || !poiEngine.value.ready) {
+      return;
+    }
+    if (!poiEngine.value.indexReady || poiEngine.value.buildingIndex) {
+      return;
+    }
+    if (!poiEngine.value.selectedGroups.length) {
+      return;
+    }
+    const viewport = poiEngine.value.pendingViewport ?? poiEngine.value.lastViewport;
+    if (!viewport) {
+      return;
+    }
+    requestViewportPois(viewport.bbox, viewport.zoom);
+  });
 
   function setTravelMode(mode: TravelProfile) {
     filters.value.travelMode = mode;
@@ -388,8 +592,11 @@ export const useAppStore = defineStore('app', () => {
     visiblePoisInIsochrone,
     topCandidates,
     initPoiEngine,
+    setMapReady,
+    updateViewport,
     setSelectedGroups,
     requestViewportPois,
+    expandCluster,
     setMapCenter,
     setMapStyleUrl,
     setTravelMode,

@@ -7,6 +7,7 @@
         @export-poi-csv="exportPoiCsv"
         @export-candidate-csv="exportCandidateCsv"
         @export-map-png="exportMapPng"
+        @fit-nanjing="handleFitNanjing"
         @upload="handleUpload"
       />
       <main class="workbench__map">
@@ -112,6 +113,10 @@ function exportMapPng() {
   ).padStart(2, '0')}`;
   const city = (import.meta.env.VITE_DEFAULT_CITY as string | undefined) || '南京市';
   saveAs(blob, `${city}-map-${date}.png`);
+}
+
+function handleFitNanjing() {
+  mapViewRef.value?.fitToNanjing?.();
 }
 
 function handleUpload(payload: { type: 'geojson' | 'csv'; data: any }) {

@@ -1,6 +1,7 @@
 import Supercluster from 'supercluster';
-import type { Feature, FeatureCollection, Point } from 'geojson';
+import type { Feature, FeatureCollection, Point, Polygon } from 'geojson';
 import { convertCoord, normalizeCoordSys, type CoordSys } from '../utils/coord';
+import { convex, featureCollection, point as turfPoint } from '@turf/turf';
 
 interface GroupRule {
   id: string;
@@ -26,9 +27,18 @@ interface PoiProperties {
   type_group: string;
 }
 
+interface RawPoint {
+  id: string;
+  name: string;
+  lng: number;
+  lat: number;
+  type_group: string;
+}
+
 type ClusterProperties = Supercluster.ClusterProperties & Record<string, unknown>;
 type PoiFeature = Feature<Point, PoiProperties>;
 type ClusterFeature = Feature<Point, PoiProperties | ClusterProperties>;
+type PolygonFeature = Feature<Polygon, Record<string, unknown>>;
 
 const DEFAULT_RULES: TypeRules = {
   groups: [
@@ -46,7 +56,6 @@ const DEFAULT_RULES: TypeRules = {
     { id: 'tourism', label: '旅游景点' },
     { id: 'public_facility', label: '公共设施' },
     { id: 'residential_realestate', label: '住宅房产' },
-    { id: 'address', label: '地名地址' },
     { id: 'other', label: '其他' }
   ],
   l1Map: {
@@ -69,7 +78,6 @@ const DEFAULT_RULES: TypeRules = {
     公共设施: 'public_facility',
     公共设施服务: 'public_facility',
     商务住宅: 'residential_realestate',
-    地名地址信息: 'address',
     室内设施: 'public_facility'
   },
   l2Overrides: [
@@ -94,7 +102,6 @@ const DEFAULT_RULES: TypeRules = {
     'government',
     'company',
     'residential_realestate',
-    'address',
     'other'
   ],
   meta: { generatedAt: new Date().toISOString(), source: 'fallback' }
@@ -107,19 +114,25 @@ const TYPE_KEYS = ['type', 'category', '类别', '大类', '小类', 'class', 'p
 const SEGMENT_SPLIT = /[|｜]+/g;
 const LEVEL_SPLIT = /[;；]+/g;
 
-let allFeatures: PoiFeature[] = [];
-let typeCounts: Record<string, number> = {};
+const HULL_MODE: 'bbox' | 'hull' = 'bbox';
+const HULL_MAX_ZOOM = 12;
+const HULL_MIN_COUNT = 30;
+const HULL_MAX_LEAVES = 300;
+
+const DEV_LOG = import.meta.env.DEV;
+const logWorker = (message: string, payload?: Record<string, unknown>) => {
+  if (!DEV_LOG) return;
+  console.info('[poi-worker]', message, payload ?? {});
+};
+
 let rules: TypeRules = DEFAULT_RULES;
 let coordConfig: CoordSysConfig = {
   poiCoordSys: 'WGS84',
   mapCoordSys: 'WGS84'
 };
-let clusterCache = new Map<string, Supercluster<PoiProperties>>();
-let indexCounts = new Map<string, number>();
-let activeIndexKey = '';
-let activeIndex: Supercluster<PoiProperties> | null = null;
-let activeIndexCount = 0;
-const MAX_DETAIL_POINTS = 200000;
+let groupPoints = new Map<string, RawPoint[]>();
+let groupIndexes = new Map<string, Supercluster<PoiProperties>>();
+let typeCounts: Record<string, number> = {};
 
 function cleanRawType(raw: string): string {
   return raw
@@ -156,8 +169,8 @@ function pickByPriority(groups: string[], priority: string[]) {
   return winner;
 }
 
-function applyOverrides(l1: string, l2: string, l3: string, rules: TypeRules) {
-  for (const override of rules.l2Overrides ?? []) {
+function applyOverrides(l1: string, l2: string, l3: string, ruleset: TypeRules) {
+  for (const override of ruleset.l2Overrides ?? []) {
     if (override.l1 !== l1) {
       continue;
     }
@@ -169,7 +182,7 @@ function applyOverrides(l1: string, l2: string, l3: string, rules: TypeRules) {
   return undefined;
 }
 
-function classifyType(rawType: string, rules: TypeRules): string {
+function classifyType(rawType: string, ruleset: TypeRules): string {
   const raw = cleanRawType(rawType);
   if (!raw) {
     return 'other';
@@ -183,14 +196,14 @@ function classifyType(rawType: string, rules: TypeRules): string {
     if (!l1) {
       return 'other';
     }
-    const baseGroup = rules.l1Map[l1];
+    const baseGroup = ruleset.l1Map[l1];
     if (!baseGroup) {
       return 'other';
     }
-    const overrideGroup = applyOverrides(l1, l2, l3, rules);
+    const overrideGroup = applyOverrides(l1, l2, l3, ruleset);
     return overrideGroup ?? baseGroup;
   });
-  return pickByPriority(segmentGroups, rules.priority);
+  return pickByPriority(segmentGroups, ruleset.priority);
 }
 
 function normalizeRules(payload: unknown): TypeRules {
@@ -250,12 +263,17 @@ function toMapCoord(coord: [number, number]): [number, number] {
   return convertCoord(coord, coordConfig.poiCoordSys, coordConfig.mapCoordSys);
 }
 
-function buildFeatures(rawData: unknown): PoiFeature[] {
-  const features: PoiFeature[] = [];
-  const counts: Record<string, number> = {};
-  rules.groups.forEach((group) => {
-    counts[group.id] = 0;
-  });
+function addPoint(point: RawPoint) {
+  if (!groupPoints.has(point.type_group)) {
+    groupPoints.set(point.type_group, []);
+  }
+  groupPoints.get(point.type_group)?.push(point);
+  typeCounts[point.type_group] = (typeCounts[point.type_group] ?? 0) + 1;
+}
+
+function buildPoints(rawData: unknown): void {
+  groupPoints = new Map();
+  typeCounts = {};
 
   if (
     rawData &&
@@ -278,38 +296,33 @@ function buildFeatures(rawData: unknown): PoiFeature[] {
       const name = resolveValue(props, NAME_KEYS) ?? `POI-${index}`;
       const rawType = resolveValue(props, TYPE_KEYS) ?? '';
       const typeGroup = classifyType(rawType, rules);
+      if (typeGroup === 'address') {
+        return;
+      }
       const [lng, lat] = toMapCoord([lonRaw, latRaw]);
-      const poiProps: PoiProperties = {
+      addPoint({
         id: String(props.id ?? props.ID ?? index),
         name,
+        lng,
+        lat,
         type_group: typeGroup
-      };
-      counts[typeGroup] = (counts[typeGroup] ?? 0) + 1;
-      features.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [lng, lat] },
-        properties: poiProps
       });
     });
-    typeCounts = counts;
-    return features;
+    return;
   }
 
   if (Array.isArray(rawData)) {
     const records = rawData.filter((item) => item && typeof item === 'object') as Record<string, unknown>[];
     if (!records.length) {
-      typeCounts = counts;
-      return features;
+      return;
     }
     const lonKey = detectKey(records, LON_KEYS);
     const latKey = detectKey(records, LAT_KEYS);
     const nameKey = detectKey(records, NAME_KEYS);
     const typeKey = detectKey(records, TYPE_KEYS);
     if (!lonKey || !latKey) {
-      typeCounts = counts;
-      return features;
+      return;
     }
-
     records.forEach((record, index) => {
       const lonRaw = toNumber(record[lonKey]);
       const latRaw = toNumber(record[latKey]);
@@ -320,25 +333,19 @@ function buildFeatures(rawData: unknown): PoiFeature[] {
         (nameKey ? String(record[nameKey] ?? '').trim() : '') || `POI-${index}`;
       const rawType = typeKey ? String(record[typeKey] ?? '').trim() : '';
       const typeGroup = classifyType(rawType, rules);
+      if (typeGroup === 'address') {
+        return;
+      }
       const [lng, lat] = toMapCoord([lonRaw, latRaw]);
-      const poiProps: PoiProperties = {
+      addPoint({
         id: String(record.id ?? record.ID ?? index),
         name,
+        lng,
+        lat,
         type_group: typeGroup
-      };
-      counts[typeGroup] = (counts[typeGroup] ?? 0) + 1;
-      features.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [lng, lat] },
-        properties: poiProps
       });
     });
-    typeCounts = counts;
-    return features;
   }
-
-  typeCounts = counts;
-  return features;
 }
 
 async function loadRules(rulesUrl: string) {
@@ -358,66 +365,90 @@ async function loadRules(rulesUrl: string) {
   }
 }
 
-function buildIndex(selectedGroups: string[]) {
-  const normalized = selectedGroups.filter(Boolean).sort();
-  const key = normalized.join('|');
-  if (!key) {
-    activeIndexKey = '';
-    activeIndex = null;
-    activeIndexCount = 0;
-    return { usedCount: 0, selectedGroups: [] };
+function ensureIndex(group: string) {
+  if (groupIndexes.has(group)) {
+    return;
   }
-
-  if (clusterCache.has(key)) {
-    activeIndexKey = key;
-    activeIndex = clusterCache.get(key) ?? null;
-    activeIndexCount = indexCounts.get(key) ?? 0;
-    return { usedCount: activeIndexCount, selectedGroups: normalized };
-  }
-
+  const points = groupPoints.get(group) ?? [];
+  const features: PoiFeature[] = points.map((point) => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [point.lng, point.lat] },
+    properties: {
+      id: point.id,
+      name: point.name,
+      type_group: point.type_group
+    }
+  }));
   const index = new Supercluster<PoiProperties>({
     radius: 70,
     maxZoom: 18,
     minZoom: 0
   });
-  const filtered = allFeatures.filter((feature) =>
-    normalized.includes(feature.properties?.type_group ?? 'other')
-  );
-  index.load(filtered);
-  clusterCache.set(key, index);
-  indexCounts.set(key, filtered.length);
-  activeIndexKey = key;
-  activeIndex = index;
-  activeIndexCount = filtered.length;
-  return { usedCount: filtered.length, selectedGroups: normalized };
+  index.load(features);
+  groupIndexes.set(group, index);
 }
 
-function queryClusters(bbox: [number, number, number, number], zoom: number) {
-  if (!activeIndex) {
-    return { type: 'FeatureCollection', features: [] } as FeatureCollection<Point, PoiProperties>;
-  }
-  let clusters = activeIndex.getClusters(bbox, zoom) as ClusterFeature[];
-  if (activeIndexCount > MAX_DETAIL_POINTS) {
-    clusters = clusters.filter((feature) =>
-      Boolean((feature.properties as ClusterProperties | undefined)?.cluster)
-    );
-  }
-  if (clusters.length > 8000) {
-    clusters = activeIndex.getClusters(bbox, Math.max(0, zoom - 2)) as ClusterFeature[];
-  }
-  if (clusters.length > 8000) {
-    clusters = clusters.filter((feature) => Boolean((feature.properties as ClusterProperties | undefined)?.cluster));
-  }
+function bboxToPolygon(minLng: number, minLat: number, maxLng: number, maxLat: number): PolygonFeature {
   return {
-    type: 'FeatureCollection',
-    features: clusters
-  } as FeatureCollection<Point, PoiProperties | ClusterProperties>;
+    type: 'Feature',
+    geometry: {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [minLng, minLat],
+          [maxLng, minLat],
+          [maxLng, maxLat],
+          [minLng, maxLat],
+          [minLng, minLat]
+        ]
+      ]
+    },
+    properties: {}
+  };
+}
+
+function buildClusterPolygon(
+  index: Supercluster<PoiProperties>,
+  clusterId: number
+): PolygonFeature | null {
+  const leaves = index.getLeaves(clusterId, HULL_MAX_LEAVES, 0);
+  if (!leaves.length) {
+    return null;
+  }
+  const coords = leaves.map((leaf) => leaf.geometry.coordinates as [number, number]);
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+  coords.forEach(([lng, lat]) => {
+    if (lng < minLng) minLng = lng;
+    if (lat < minLat) minLat = lat;
+    if (lng > maxLng) maxLng = lng;
+    if (lat > maxLat) maxLat = lat;
+  });
+  if (HULL_MODE === 'hull' && coords.length >= 3) {
+    const hull = convex(featureCollection(coords.map((c) => turfPoint(c))));
+    if (hull) {
+      return hull as PolygonFeature;
+    }
+  }
+  return bboxToPolygon(minLng, minLat, maxLng, maxLat);
 }
 
 type IncomingMessage =
   | { type: 'INIT'; payload: { poiUrl: string; rulesUrl: string; coordSysConfig: CoordSysConfig } }
-  | { type: 'BUILD_INDEX'; payload: { selectedGroups: string[] } }
-  | { type: 'QUERY'; payload: { bbox: [number, number, number, number]; zoom: number; requestId: number } };
+  | { type: 'BUILD_INDEX'; payload: { groups: string[] } }
+  | {
+      type: 'QUERY';
+      payload: {
+        bbox: [number, number, number, number];
+        zoom: number;
+        groups: string[];
+        includeHull?: boolean;
+        requestId: number;
+      };
+    }
+  | { type: 'EXPAND'; payload: { group: string; clusterId: number; requestId: number } };
 
 self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
   const { type, payload } = event.data;
@@ -434,34 +465,98 @@ self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
         throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
       const rawData = await response.json();
-      allFeatures = buildFeatures(rawData);
+      buildPoints(rawData);
       self.postMessage({
         type: 'INIT_DONE',
         payload: {
-          total: allFeatures.length,
+          total: Object.values(typeCounts).reduce((sum, value) => sum + value, 0),
           typeCounts,
           rulesMeta: rules.meta ?? null
         }
+      });
+      logWorker('init_done', {
+        groups: Object.keys(typeCounts).length,
+        total: Object.values(typeCounts).reduce((sum, value) => sum + value, 0)
       });
       return;
     }
 
     if (type === 'BUILD_INDEX') {
-      const { selectedGroups } = payload;
-      const result = buildIndex(selectedGroups);
+      const groups = payload.groups.filter((group) => group && group !== 'address');
+      groups.forEach((group) => ensureIndex(group));
       self.postMessage({
         type: 'INDEX_READY',
-        payload: result
+        payload: { groups }
       });
+      logWorker('index_ready', { groups });
       return;
     }
 
     if (type === 'QUERY') {
-      const { bbox, zoom, requestId } = payload;
-      const fc = queryClusters(bbox, zoom);
+      const { bbox, zoom, groups, requestId, includeHull } = payload;
+      const shouldIncludeHull = Boolean(includeHull);
+      logWorker('query_recv', { requestId, bbox, zoom, groups, includeHull: shouldIncludeHull });
+      const results: Record<string, { points: FeatureCollection<Point>; hulls: FeatureCollection<Polygon> }> = {};
+      const counts: Record<string, { pointsCount: number; clustersCount: number }> = {};
+      groups
+        .filter((group) => group && group !== 'address')
+        .forEach((group) => {
+          ensureIndex(group);
+          const index = groupIndexes.get(group);
+          if (!index) {
+            results[group] = {
+              points: { type: 'FeatureCollection', features: [] },
+              hulls: { type: 'FeatureCollection', features: [] }
+            };
+            counts[group] = { pointsCount: 0, clustersCount: 0 };
+            return;
+          }
+          const clusters = index.getClusters(bbox, zoom) as ClusterFeature[];
+          const clustersCount = clusters.filter(
+            (feature) => Boolean((feature.properties as ClusterProperties | undefined)?.cluster)
+          ).length;
+          const pointsCount = clusters.length - clustersCount;
+          const hulls: PolygonFeature[] = [];
+          if (shouldIncludeHull && zoom <= HULL_MAX_ZOOM) {
+            clusters.forEach((feature) => {
+              const props = feature.properties as ClusterProperties | undefined;
+              if (!props?.cluster) return;
+              const count = Number(props.point_count ?? 0);
+              if (count < HULL_MIN_COUNT) return;
+              const clusterId = Number((props as { cluster_id?: number }).cluster_id);
+              if (!Number.isFinite(clusterId)) return;
+              const polygon = buildClusterPolygon(index, clusterId);
+              if (!polygon) return;
+              polygon.properties = {
+                group,
+                cluster_id: clusterId,
+                point_count: count
+              };
+              hulls.push(polygon);
+            });
+          }
+          results[group] = {
+            points: { type: 'FeatureCollection', features: clusters as Feature<Point, PoiProperties>[] },
+            hulls: { type: 'FeatureCollection', features: hulls }
+          };
+          counts[group] = { pointsCount, clustersCount };
+        });
       self.postMessage({
         type: 'QUERY_RESULT',
-        payload: { fc, requestId, indexKey: activeIndexKey }
+        payload: { requestId, results }
+      });
+      logWorker('query_result', { requestId, groups: Object.keys(results).length, counts });
+      return;
+    }
+
+    if (type === 'EXPAND') {
+      const { group, clusterId, requestId } = payload;
+      ensureIndex(group);
+      const index = groupIndexes.get(group);
+      const zoom = index ? index.getClusterExpansionZoom(clusterId) : null;
+      self.postMessage({
+        type: 'EXPAND_RESULT',
+        payload: { requestId, zoom }
       });
     }
   } catch (error) {

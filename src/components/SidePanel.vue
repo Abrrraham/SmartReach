@@ -33,6 +33,9 @@
       <button type="button" class="button button--ghost" @click="clearStyleUrl">
         使用默认样式
       </button>
+      <button type="button" class="button button--ghost" @click="fitNanjing">
+        南京全域
+      </button>
 
       <h3>POI 类型 (type_group)</h3>
       <div class="button-group button-group--row">
@@ -40,18 +43,19 @@
         <button type="button" class="button button--ghost" @click="clearGroups">清空</button>
         <button type="button" class="button button--ghost" @click="invertGroups">反选</button>
       </div>
-      <p v-if="poiEngine.loading" class="helper-text">正在重建索引...</p>
+      <p v-if="poiEngine.buildingIndex" class="helper-text">正在准备 POI...</p>
+      <p v-else-if="poiEngine.queryLoading" class="helper-text">正在渲染...</p>
       <p v-else-if="!selectedGroups.length" class="helper-text helper-text--warn">
         未选择任何类型，POI 将不显示。
       </p>
       <div class="checkbox-grid">
         <label v-for="group in sortedGroups" :key="group.id" class="checkbox-item">
           <input
-            :checked="selectedGroups.includes(group.id)"
             type="checkbox"
             :value="group.id"
-            @change="toggleGroup(group.id)"
+            v-model="selectedGroups"
           />
+          <span class="checkbox-item__dot" :style="{ backgroundColor: group.color }" />
           <span>{{ group.label }}</span>
           <span class="checkbox-item__count">{{ group.count }}</span>
         </label>
@@ -139,6 +143,7 @@
 import { computed, reactive, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store/app';
+import { GROUP_COLORS, GROUP_LABELS, GROUP_ORDER } from '../utils/poiGroups';
 import UploadModal from './UploadModal.vue';
 
 interface WeightLabels {
@@ -172,6 +177,7 @@ const emit = defineEmits<{
   (event: 'export-poi-csv'): void;
   (event: 'export-candidate-csv'): void;
   (event: 'export-map-png'): void;
+  (event: 'fit-nanjing'): void;
   (event: 'upload', payload: { type: 'geojson' | 'csv'; data: unknown }): void;
 }>();
 
@@ -195,32 +201,23 @@ const weightKeys = computed(() => Object.keys(weights) as Array<keyof typeof wei
 
 const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
 
-const GROUP_LABELS: Record<string, string> = {
-  food: '餐饮',
-  shopping: '购物',
-  life_service: '生活服务',
-  medical: '医疗健康',
-  education_culture: '科教文化',
-  transport: '交通出行',
-  lodging: '住宿',
-  finance: '金融',
-  government: '政府与社会组织',
-  company: '公司企业',
-  entertainment_sports: '文体娱乐',
-  tourism: '旅游景点',
-  public_facility: '公共设施',
-  residential_realestate: '住宅房产',
-  address: '地名地址',
-  other: '其他'
-};
-
-const selectedGroups = computed(() => poiEngine.value.selectedGroups);
+const selectedGroups = computed({
+  get: () => poiEngine.value.selectedGroups,
+  set: (groups: string[]) => {
+    store.setSelectedGroups(groups);
+  }
+});
 const sortedGroups = computed(() => {
-  return Object.entries(poiEngine.value.typeCounts)
-    .map(([id, count]) => ({
+  if (poiEngine.value.typeCounts.address) {
+    console.warn('[poi] address type_group should be filtered out.');
+  }
+  const counts = poiEngine.value.typeCounts;
+  return GROUP_ORDER.filter((id) => id in counts)
+    .map((id) => ({
       id,
-      count,
-      label: GROUP_LABELS[id] ?? id
+      count: counts[id] ?? 0,
+      label: GROUP_LABELS[id] ?? id,
+      color: GROUP_COLORS[id] ?? '#868e96'
     }))
     .sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
 });
@@ -258,17 +255,9 @@ function clearStyleUrl() {
   updateStyleUrl();
 }
 
-function toggleGroup(groupId: string) {
-  const current = new Set(poiEngine.value.selectedGroups);
-  if (current.has(groupId)) {
-    current.delete(groupId);
-  } else {
-    current.add(groupId);
-  }
-  store.setSelectedGroups(Array.from(current));
-}
-
 function selectAllGroups() {
+  const ok = window.confirm('全选可能影响性能，是否继续？');
+  if (!ok) return;
   store.setSelectedGroups(sortedGroups.value.map((group) => group.id));
 }
 
@@ -342,6 +331,10 @@ function exportCandidateCsv() {
 
 function exportMapPng() {
   emit('export-map-png');
+}
+
+function fitNanjing() {
+  emit('fit-nanjing');
 }
 </script>
 
@@ -444,6 +437,13 @@ function exportMapPng() {
   align-items: center;
   font-size: 0.9rem;
   color: #343a40;
+}
+
+.checkbox-item__dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.1);
 }
 
 .checkbox-item__count {
