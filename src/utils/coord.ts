@@ -146,3 +146,63 @@ export function convertBounds(
   }
   return [convertCoord(bounds[0], from, to), convertCoord(bounds[1], from, to)];
 }
+
+function transformCoords(
+  coords: number[] | number[][] | number[][][] | number[][][][],
+  fnCoord: (coord: [number, number]) => [number, number]
+): any {
+  if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+    return fnCoord([coords[0], coords[1]]);
+  }
+  return (coords as any[]).map((item) => transformCoords(item, fnCoord));
+}
+
+function transformGeometry(
+  geometry: GeoJSON.Geometry,
+  fnCoord: (coord: [number, number]) => [number, number]
+): GeoJSON.Geometry {
+  if (geometry.type === 'GeometryCollection') {
+    return {
+      ...geometry,
+      geometries: geometry.geometries.map((item) => transformGeometry(item, fnCoord))
+    };
+  }
+  return {
+    ...geometry,
+    coordinates: transformCoords(geometry.coordinates as any, fnCoord)
+  };
+}
+
+export function transformGeoJSON<T extends GeoJSON.GeoJSON>(
+  geojson: T,
+  fnCoord: (coord: [number, number]) => [number, number]
+): T {
+  if (!geojson) {
+    return geojson;
+  }
+  if (geojson.type === 'FeatureCollection') {
+    return {
+      ...geojson,
+      features: geojson.features.map((feature) =>
+        transformGeoJSON(feature as GeoJSON.Feature, fnCoord)
+      )
+    } as T;
+  }
+  if (geojson.type === 'Feature') {
+    if (!geojson.geometry) {
+      return geojson;
+    }
+    return {
+      ...geojson,
+      geometry: transformGeometry(geojson.geometry, fnCoord)
+    } as T;
+  }
+  return transformGeometry(geojson as GeoJSON.Geometry, fnCoord) as T;
+}
+
+export function transformGeoJSONCoordinates<T extends GeoJSON.GeoJSON>(
+  geojson: T,
+  fnCoord: (coord: [number, number]) => [number, number]
+): T {
+  return transformGeoJSON(geojson, fnCoord);
+}

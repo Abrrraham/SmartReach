@@ -41,72 +41,71 @@ const { data, filters, visiblePoisInIsochrone } = storeToRefs(store);
 
 function handleMapClick(coordinates: [number, number]) {
   lastOrigin.value = coordinates;
-  store.generateIsochrones(coordinates);
+  store.setIsoOriginFromMapClick(coordinates[0], coordinates[1]);
+  store.generateIsochrones();
 }
 
 function handleGenerateIsochrone() {
-  if (lastOrigin.value) {
-    store.generateIsochrones(lastOrigin.value);
-  }
+  store.generateIsochrones();
 }
 
 function handlePoiClick(poi: POI) {
-  if (!lastOrigin.value) {
-    return;
+  store.planRouteToPoi(poi);
+}
+
+function escapeCsv(value: unknown): string {
+  const text = value === null || value === undefined ? '' : String(value);
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
   }
-  store.planRouteToPoi(poi, lastOrigin.value);
+  return text;
 }
 
 function exportPoiCsv() {
   const rows = [
-    ['id', 'name', 'type_group', 'lon', 'lat', 'address'].join(',')
+    ['id', 'name', 'type_group', 'lon', 'lat', 'address'].map(escapeCsv).join(',')
   ];
   visiblePoisInIsochrone.value.forEach((poi) => {
     rows.push(
       [
-        poi.id,
-        poi.name,
-        poi.type_group,
-        poi.lon.toFixed(6),
-        poi.lat.toFixed(6),
-        poi.address ?? ''
+        escapeCsv(poi.id),
+        escapeCsv(poi.name),
+        escapeCsv(poi.type_group),
+        escapeCsv(poi.lon.toFixed(6)),
+        escapeCsv(poi.lat.toFixed(6)),
+        escapeCsv(poi.address ?? '')
       ].join(',')
     );
   });
-  const csv = rows.join('\n');
+  const csv = `\ufeff${rows.join('\n')}`;
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   saveAs(blob, `${filters.value.travelMode}_isochrone_pois.csv`);
 }
 
 function exportCandidateCsv() {
-  const rows = [['id', 'name', 'type_group', 'lon', 'lat', 'score'].join(',')];
+  const rows = [['id', 'name', 'type_group', 'lon', 'lat', 'score'].map(escapeCsv).join(',')];
   data.value.candidates.forEach((candidate) => {
     rows.push(
       [
-        candidate.id,
-        candidate.name,
-        candidate.type_group,
-        candidate.lon.toFixed(6),
-        candidate.lat.toFixed(6),
-        candidate.score ?? ''
+        escapeCsv(candidate.id),
+        escapeCsv(candidate.name),
+        escapeCsv(candidate.type_group),
+        escapeCsv(candidate.lon.toFixed(6)),
+        escapeCsv(candidate.lat.toFixed(6)),
+        escapeCsv(candidate.score ?? '')
       ].join(',')
     );
   });
-  const csv = rows.join('\n');
+  const csv = `\ufeff${rows.join('\n')}`;
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   saveAs(blob, 'candidate_scores.csv');
 }
 
-function exportMapPng() {
-  const dataUrl = mapViewRef.value?.getMapDataUrl();
+async function exportMapPng() {
+  const dataUrl = await mapViewRef.value?.getMapDataUrl();
   if (!dataUrl) return;
-  const byteString = atob(dataUrl.split(',')[1]);
-  const arrayBuffer = new ArrayBuffer(byteString.length);
-  const intArray = new Uint8Array(arrayBuffer);
-  for (let i = 0; i < byteString.length; i += 1) {
-    intArray[i] = byteString.charCodeAt(i);
-  }
-  const blob = new Blob([arrayBuffer], { type: 'image/png' });
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
   const now = new Date();
   const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
     now.getDate()

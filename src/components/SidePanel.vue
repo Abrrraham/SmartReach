@@ -93,6 +93,17 @@
       <button type="button" class="button button--primary" @click="requestIsochrone">
         生成等时圈
       </button>
+      <button type="button" class="button button--ghost" @click="clearIsochrones">
+        清除等时圈
+      </button>
+      <p v-if="iso.loading" class="helper-text">正在生成等时圈...</p>
+      <p v-else-if="isoEngine.indexing" class="helper-text">
+        正在筛选圈内POI/构建索引...
+      </p>
+      <p v-else-if="iso.error" class="helper-text helper-text--warn">{{ iso.error }}</p>
+      <p v-if="iso.isFallback && iso.geojson" class="helper-text helper-text--warn">
+        当前为近似圆（未配置 ORS Key 或服务不可用）
+      </p>
 
       <h3>圈内找点</h3>
       <p class="helper-text">地图圈选后，列表将同步展示圈内设施。</p>
@@ -188,7 +199,7 @@ const selectedTimes = ref<number[]>([300, 600, 900]);
 const travelMode = ref<'foot-walking' | 'cycling-regular' | 'driving-car'>('foot-walking');
 
 const store = useAppStore();
-const { filters, map, analysis, poiEngine } = storeToRefs(store);
+const { filters, map, analysis, poiEngine, iso, isoEngine } = storeToRefs(store);
 
 const weights = reactive({
   demand: analysis.value.sitingWeights.demand,
@@ -319,6 +330,10 @@ async function handleUpload(payload: { type: 'geojson' | 'csv'; data: unknown })
 
 function requestIsochrone() {
   emit('request-isochrone');
+}
+
+function clearIsochrones() {
+  store.clearIsochrones();
 }
 
 function exportPoiCsv() {

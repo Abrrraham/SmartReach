@@ -18,7 +18,7 @@ import MaplibreGeocoder, {
   type MaplibreGeocoderFeatureResults
 } from '@maplibre/maplibre-gl-geocoder';
 import { storeToRefs } from 'pinia';
-import type { FeatureCollection, LineString, Point, Polygon } from 'geojson';
+import type { FeatureCollection, Point, Polygon } from 'geojson';
 import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
 import { buildAmapRasterStyle } from '../services/style';
@@ -71,7 +71,9 @@ const OSM_STYLE: maplibregl.StyleSpecification = {
 const AMAP_STYLE: maplibregl.StyleSpecification = buildAmapRasterStyle();
 
 const ISOCHRONE_SOURCE_ID = 'isochrones';
+const ISO_ORIGIN_SOURCE_ID = 'iso-origin';
 const ROUTE_SOURCE_ID = 'route';
+const ROUTE_ENDPOINT_SOURCE_ID = 'route-endpoint';
 const POINT_SOURCE_PREFIX = 'poi';
 const HULL_SOURCE_PREFIX = 'hull';
 const CLUSTER_RADIUS_MIN = 12;
@@ -106,6 +108,13 @@ const CLUSTER_HALO_EXPR: ExpressionSpecification = [
   CLUSTER_RADIUS_EXPR,
   6
 ];
+const ISO_VALUE_EXPR: ExpressionSpecification = [
+  'coalesce',
+  ['get', 'value'],
+  ['get', 'contour'],
+  ['get', 'bucket'],
+  0
+];
 
 const emit = defineEmits<{
   (event: 'click-poi', poi: POI): void;
@@ -115,7 +124,7 @@ const emit = defineEmits<{
 const mapContainer = ref<HTMLDivElement | null>(null);
 const mapInstance = ref<MaplibreMap>();
 const store = useAppStore();
-const { map, nanjingBounds, analysis, poiEngine } = storeToRefs(store);
+const { map, nanjingBounds, analysis, poiEngine, isoEngine, route } = storeToRefs(store);
 const viewportDebounceMs = 120;
 let viewportTimer: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -218,6 +227,14 @@ const emptyPointCollection: FeatureCollection<Point, Record<string, unknown>> = 
   features: []
 };
 const emptyHullCollection: FeatureCollection<Polygon, Record<string, unknown>> = {
+  type: 'FeatureCollection',
+  features: []
+};
+const emptyOriginCollection: FeatureCollection<Point, Record<string, unknown>> = {
+  type: 'FeatureCollection',
+  features: []
+};
+const emptyRouteCollection: FeatureCollection = {
   type: 'FeatureCollection',
   features: []
 };
@@ -502,8 +519,8 @@ function ensureIsochroneLayers(map: MaplibreMap) {
       type: 'fill',
       source: ISOCHRONE_SOURCE_ID,
       paint: {
-        'fill-color': ['interpolate', ['linear'], ['get', 'contour'], 300, '#748ffc', 900, '#364fc7'],
-        'fill-opacity': 0.2
+        'fill-color': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, '#748ffc', 600, '#5c7cfa', 900, '#364fc7'],
+        'fill-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.35, 900, 0.12]
       }
     });
 
@@ -513,7 +530,57 @@ function ensureIsochroneLayers(map: MaplibreMap) {
       source: ISOCHRONE_SOURCE_ID,
       paint: {
         'line-color': '#364fc7',
-        'line-width': 2
+        'line-width': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 2.4, 900, 1.2],
+        'line-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.8, 900, 0.4]
+      }
+    });
+  }
+}
+
+function ensureIsoOriginLayers(map: MaplibreMap) {
+  if (!map.getSource(ISO_ORIGIN_SOURCE_ID)) {
+    map.addSource(ISO_ORIGIN_SOURCE_ID, {
+      type: 'geojson',
+      data: emptyOriginCollection
+    });
+
+    map.addLayer({
+      id: 'iso-origin-halo',
+      type: 'circle',
+      source: ISO_ORIGIN_SOURCE_ID,
+      paint: {
+        'circle-radius': 14,
+        'circle-color': '#74c0fc',
+        'circle-opacity': 0.25
+      }
+    });
+
+    map.addLayer({
+      id: 'iso-origin-point',
+      type: 'circle',
+      source: ISO_ORIGIN_SOURCE_ID,
+      paint: {
+        'circle-radius': 8,
+        'circle-color': '#1c7ed6',
+        'circle-stroke-width': 2,
+        'circle-stroke-color': '#ffffff'
+      }
+    });
+
+    map.addLayer({
+      id: 'iso-origin-label',
+      type: 'symbol',
+      source: ISO_ORIGIN_SOURCE_ID,
+      layout: {
+        'text-field': ['get', 'label'],
+        'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+        'text-size': 12,
+        'text-offset': [0, 1.2]
+      },
+      paint: {
+        'text-color': '#1c7ed6',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.2
       }
     });
   }
@@ -527,13 +594,56 @@ function ensureRouteLayer(map: MaplibreMap) {
     });
 
     map.addLayer({
+      id: 'route-casing',
+      type: 'line',
+      source: ROUTE_SOURCE_ID,
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': ['interpolate', ['linear'], ['zoom'], 10, 6, 14, 10],
+        'line-opacity': 0.9
+      }
+    });
+
+    map.addLayer({
       id: 'route-line',
       type: 'line',
       source: ROUTE_SOURCE_ID,
       paint: {
         'line-color': '#ff922b',
-        'line-width': 4,
+        'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 6],
         'line-opacity': 0.8
+      }
+    });
+  }
+}
+
+function ensureRouteEndpointLayer(map: MaplibreMap) {
+  if (!map.getSource(ROUTE_ENDPOINT_SOURCE_ID)) {
+    map.addSource(ROUTE_ENDPOINT_SOURCE_ID, {
+      type: 'geojson',
+      data: emptyOriginCollection
+    });
+
+    map.addLayer({
+      id: 'route-endpoint-halo',
+      type: 'circle',
+      source: ROUTE_ENDPOINT_SOURCE_ID,
+      paint: {
+        'circle-radius': 12,
+        'circle-color': '#ffd8a8',
+        'circle-opacity': 0.35
+      }
+    });
+
+    map.addLayer({
+      id: 'route-endpoint-point',
+      type: 'circle',
+      source: ROUTE_ENDPOINT_SOURCE_ID,
+      paint: {
+        'circle-radius': 7,
+        'circle-color': '#ff922b',
+        'circle-stroke-width': 2,
+        'circle-stroke-color': '#ffffff'
       }
     });
   }
@@ -575,21 +685,69 @@ function setIsochrones(geojson?: FeatureCollection) {
   }
 }
 
-function setRoute(feature?: GeoJSON.Feature<LineString>) {
+function setIsoOrigin(origin?: { lng: number; lat: number }, active?: boolean) {
+  const map = mapInstance.value;
+  if (!map) return;
+  ensureIsoOriginLayers(map);
+
+  const source = map.getSource(ISO_ORIGIN_SOURCE_ID) as GeoJSONSource | undefined;
+  if (!source) {
+    return;
+  }
+  if (active && origin) {
+    source.setData({
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: {
+            type: 'Point',
+            coordinates: [origin.lng, origin.lat]
+          },
+          properties: {
+            label: '起点'
+          }
+        }
+      ]
+    } as FeatureCollection<Point, Record<string, unknown>>);
+  } else {
+    source.setData(emptyOriginCollection);
+  }
+}
+
+function setRoute(geojson?: FeatureCollection) {
   const map = mapInstance.value;
   if (!map) return;
   ensureRouteLayer(map);
 
   const source = map.getSource(ROUTE_SOURCE_ID) as GeoJSONSource | undefined;
   if (source) {
-    source.setData(
-      feature
-        ? ({
-            type: 'FeatureCollection',
-            features: [feature]
-          } as FeatureCollection)
-        : { type: 'FeatureCollection', features: [] }
-    );
+    source.setData(geojson ?? emptyRouteCollection);
+  }
+}
+
+function setRouteEndpoint(end?: { lng: number; lat: number }, active?: boolean) {
+  const map = mapInstance.value;
+  if (!map) return;
+  ensureRouteEndpointLayer(map);
+  const source = map.getSource(ROUTE_ENDPOINT_SOURCE_ID) as GeoJSONSource | undefined;
+  if (!source) return;
+  if (active && end) {
+    source.setData({
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: {
+            type: 'Point',
+            coordinates: [end.lng, end.lat]
+          },
+          properties: {}
+        }
+      ]
+    } as FeatureCollection<Point, Record<string, unknown>>);
+  } else {
+    source.setData(emptyOriginCollection);
   }
 }
 
@@ -603,7 +761,8 @@ function setupMap() {
     center: map.value.center as LngLatLike,
     zoom: map.value.zoom,
     minZoom: MIN_ZOOM,
-    maxZoom: MAX_ZOOM
+    maxZoom: MAX_ZOOM,
+    preserveDrawingBuffer: true
   });
 
   const resizeTarget = mapContainer.value?.parentElement ?? mapContainer.value;
@@ -658,6 +817,7 @@ function setupMap() {
 
   mapInstanceLocal.on('load', () => {
     ensureIsochroneLayers(mapInstanceLocal);
+    ensureIsoOriginLayers(mapInstanceLocal);
     ensureRouteLayer(mapInstanceLocal);
     syncGroupLayers(mapInstanceLocal);
     store.setMapReady(true);
@@ -669,8 +829,14 @@ function setupMap() {
     if (analysis.value.isochrone) {
       setIsochrones(analysis.value.isochrone);
     }
-    if (analysis.value.route) {
-      setRoute(analysis.value.route as GeoJSON.Feature<LineString>);
+    if (isoEngine.value.active) {
+      setIsoOrigin(isoEngine.value.origin, isoEngine.value.active);
+    }
+    if (route.value.geojson) {
+      setRoute(route.value.geojson);
+    }
+    if (route.value.active) {
+      setRouteEndpoint(route.value.end, route.value.active);
     }
     scheduleViewportQuery();
   });
@@ -717,17 +883,24 @@ onBeforeUnmount(() => {
       if (!map) return;
       const style = styleUrl && styleUrl.length > 0 ? styleUrl : resolveDefaultStyle();
       map.setStyle(style);
-      map.once('styledata', () => {
+      map.once('style.load', () => {
         syncGroupLayers(map);
         ensureIsochroneLayers(map);
+        ensureIsoOriginLayers(map);
         ensureRouteLayer(map);
         refreshGroupData(map);
         scheduleMapResize();
         if (analysis.value.isochrone) {
           setIsochrones(analysis.value.isochrone);
         }
-        if (analysis.value.route) {
-          setRoute(analysis.value.route as GeoJSON.Feature<LineString>);
+        if (isoEngine.value.active) {
+          setIsoOrigin(isoEngine.value.origin, isoEngine.value.active);
+        }
+        if (route.value.geojson) {
+          setRoute(route.value.geojson);
+        }
+        if (route.value.active) {
+          setRouteEndpoint(route.value.end, route.value.active);
         }
         scheduleViewportQuery();
       });
@@ -785,16 +958,60 @@ watch(
 );
 
 watch(
-  () => analysis.value.route,
-  (feature) => {
-    setRoute(feature as GeoJSON.Feature<LineString> | undefined);
+  () => [isoEngine.value.active, isoEngine.value.origin?.lng, isoEngine.value.origin?.lat],
+  () => {
+    setIsoOrigin(isoEngine.value.origin, isoEngine.value.active);
   }
 );
 
-function getMapDataUrl(): string | undefined {
+watch(
+  () => route.value.geojson,
+  (geojson) => {
+    setRoute(geojson);
+  }
+);
+
+watch(
+  () => [route.value.active, route.value.end?.lng, route.value.end?.lat],
+  () => {
+    setRouteEndpoint(route.value.end, route.value.active);
+  }
+);
+
+function getMapDataUrl(): Promise<string | undefined> {
   const map = mapInstance.value;
-  if (!map) return undefined;
-  return map.getCanvas().toDataURL('image/png');
+  if (!map) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    const capture = () => {
+      const canvas = map.getCanvas();
+      const output = document.createElement('canvas');
+      output.width = canvas.width;
+      output.height = canvas.height;
+      const ctx = output.getContext('2d');
+      if (!ctx) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, output.width, output.height);
+        ctx.drawImage(canvas, 0, 0);
+        resolve(output.toDataURL('image/png'));
+      } catch (error) {
+        console.warn('[map] export failed', error);
+        resolve(undefined);
+      }
+    };
+    if (map.isStyleLoaded()) {
+      map.once('idle', capture);
+      map.triggerRepaint();
+    } else {
+      map.once('load', () => {
+        map.once('idle', capture);
+        map.triggerRepaint();
+      });
+    }
+  });
 }
 
 function fitToNanjing() {

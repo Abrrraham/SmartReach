@@ -6,26 +6,38 @@
         <span v-if="analysis.isochrone" class="badge">已生成</span>
         <span v-else class="badge badge--muted">未生成</span>
       </header>
-      <ul class="stat-list">
-        <li v-for="item in typeStats" :key="item.type_group" class="stat-list__item">
-          <span class="stat-list__label">{{ item.label }}</span>
-          <span class="stat-list__value">{{ item.count }}</span>
-        </li>
-      </ul>
+      <div class="stat-tabs">
+        <button
+          v-for="item in isoGroupStatsSorted"
+          :key="item.id"
+          type="button"
+          class="stat-tab"
+          :class="{ 'stat-tab--active': item.id === ui.activeIsoGroupId }"
+          :style="{ '--chip-color': item.color }"
+          @click="setActiveIsoGroup(item.id)"
+        >
+          <span class="stat-tab__label">{{ item.label }}</span>
+          <span class="stat-tab__value">{{ item.count }}</span>
+        </button>
+      </div>
     </section>
 
     <section class="result-section">
       <header class="result-section__header">
-        <h3>圈内 POI</h3>
-        <span class="result-section__meta">{{ visiblePoisInIsochrone.length }} 条</span>
+        <h3 v-if="activeGroupStat">
+          圈内 POI · {{ activeGroupStat.label }}（{{ activeGroupStat.count }} 条）
+        </h3>
+        <h3 v-else>圈内 POI</h3>
+        <span v-if="!activeGroupStat" class="result-section__meta">
+          {{ `${activeIsoPois.length} 条` }}
+        </span>
       </header>
       <p v-if="!analysis.isochrone" class="helper-text">请先生成等时圈查看结果。</p>
-      <p v-else-if="!visiblePoisInIsochrone.length" class="helper-text">
-        当前筛选无结果。
-      </p>
+      <p v-else-if="!activeGroupStat" class="helper-text">当前筛选无结果。</p>
+      <p v-else-if="!activeIsoPois.length" class="helper-text">该分类圈内暂无 POI。</p>
       <template v-else>
         <ul class="poi-list" aria-label="圈内 POI 列表">
-          <li v-for="poi in pagedPois" :key="poi.id" class="poi-list__item">
+          <li v-for="poi in activeIsoPoisPaged" :key="poi.id" class="poi-list__item">
             <div class="poi-list__info">
               <strong>{{ poi.name }}</strong>
               <span class="poi-list__meta">{{ formatTypeGroup(poi.type_group) }}</span>
@@ -43,6 +55,50 @@
         >
           查看更多
         </button>
+      </template>
+    </section>
+
+    <section class="result-section">
+      <header class="result-section__header">
+        <h3>路线规划</h3>
+        <button
+          type="button"
+          class="button button--ghost"
+          :disabled="!route.active"
+          @click="clearRoute"
+        >
+          清除路线
+        </button>
+      </header>
+      <p v-if="!route.active" class="helper-text">点击 POI 查看路线详情。</p>
+      <p v-else-if="route.loading" class="helper-text">正在规划路线...</p>
+      <template v-else>
+        <p v-if="route.summary" class="route-summary">
+          距离：{{ formatDistance(route.summary.distance) }}，
+          用时：{{ formatDuration(route.summary.duration) }}
+        </p>
+        <p v-if="route.isFallback" class="helper-text helper-text--warn">
+          当前为直线近似（ORS 不可用）
+        </p>
+        <p v-else-if="route.error" class="helper-text helper-text--warn">
+          {{ route.error }}
+        </p>
+        <div v-if="route.steps?.length" class="route-steps">
+          <h4>路线步骤</h4>
+          <ol class="route-steps__list">
+            <li v-for="(step, index) in visibleSteps" :key="index">
+              {{ step.instruction }}（{{ formatDistance(step.distance) }} / {{ formatDuration(step.duration) }}）
+            </li>
+          </ol>
+          <button
+            v-if="route.steps.length > stepsPreviewCount"
+            type="button"
+            class="button button--ghost"
+            @click="stepsExpanded = !stepsExpanded"
+          >
+            {{ stepsExpanded ? '收起步骤' : '展开全部步骤' }}
+          </button>
+        </div>
       </template>
     </section>
 
@@ -85,37 +141,35 @@ const emit = defineEmits<{
 }>();
 
 const store = useAppStore();
-const { analysis, topCandidates, visiblePoisInIsochrone } = storeToRefs(store);
+const { analysis, topCandidates, route, ui, isoGroupStatsSorted, activeIsoPois, activeIsoPoisPaged } =
+  storeToRefs(store);
 
-const page = ref(1);
-const pageSize = 200;
-const pagedPois = computed(() =>
-  visiblePoisInIsochrone.value.slice(0, page.value * pageSize)
-);
+const stepsExpanded = ref(false);
+const stepsPreviewCount = 10;
 const canLoadMore = computed(
-  () => pagedPois.value.length < visiblePoisInIsochrone.value.length
+  () => activeIsoPoisPaged.value.length < activeIsoPois.value.length
 );
+const visibleSteps = computed(() => {
+  if (!route.value.steps?.length) {
+    return [];
+  }
+  return stepsExpanded.value
+    ? route.value.steps
+    : route.value.steps.slice(0, stepsPreviewCount);
+});
 
 watch(
-  visiblePoisInIsochrone,
-  () => {
-    page.value = 1;
-  },
-  { deep: true }
+  () => route.value.active,
+  (active) => {
+    if (!active) {
+      stepsExpanded.value = false;
+    }
+  }
 );
 
-const typeStats = computed(() => {
-  const stats = new Map<string, number>();
-  visiblePoisInIsochrone.value.forEach((poi) => {
-    stats.set(poi.type_group, (stats.get(poi.type_group) ?? 0) + 1);
-  });
-
-  return Array.from(stats.entries()).map(([type_group, count]) => ({
-    type_group,
-    label: formatTypeGroup(type_group),
-    count
-  }));
-});
+const activeGroupStat = computed(() =>
+  isoGroupStatsSorted.value.find((item) => item.id === ui.value.activeIsoGroupId)
+);
 
 function formatTypeGroup(typeGroup: string) {
   const mapping: Record<string, string> = {
@@ -140,11 +194,42 @@ function formatTypeGroup(typeGroup: string) {
 }
 
 function loadMorePois() {
-  page.value += 1;
+  store.loadMoreIsoPois();
+}
+
+function setActiveIsoGroup(id: string) {
+  store.setActiveIsoGroup(id);
 }
 
 function navigateToPoi(poi: POI) {
   emit('navigate', poi);
+}
+
+function clearRoute() {
+  store.clearRoute();
+}
+
+function formatDistance(distance: number) {
+  if (!Number.isFinite(distance)) {
+    return '-';
+  }
+  if (distance >= 1000) {
+    return `${(distance / 1000).toFixed(1)} km`;
+  }
+  return `${Math.round(distance)} m`;
+}
+
+function formatDuration(duration: number) {
+  if (!Number.isFinite(duration)) {
+    return '-';
+  }
+  if (duration >= 3600) {
+    return `${(duration / 60).toFixed(0)} 分钟`;
+  }
+  if (duration >= 60) {
+    return `${Math.round(duration / 60)} 分钟`;
+  }
+  return `${Math.round(duration)} 秒`;
 }
 </script>
 
@@ -184,32 +269,61 @@ function navigateToPoi(poi: POI) {
   color: #868e96;
 }
 
-.stat-list {
-  list-style: none;
-  padding: 0;
+.route-summary {
   margin: 0;
+  font-size: 0.9rem;
+  color: #343a40;
+}
+
+.route-steps {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
 }
 
-.stat-list__item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: #f1f3f5;
-  padding: 0.5rem 0.75rem;
-  border-radius: 0.5rem;
-}
-
-.stat-list__label {
-  font-size: 0.9rem;
+.route-steps__list {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.35rem;
   color: #495057;
+  font-size: 0.85rem;
 }
 
-.stat-list__value {
+.stat-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.stat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #e9ecef;
+  background: #f1f3f5;
+  color: #495057;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.stat-tab__label {
   font-weight: 600;
-  color: #364fc7;
+}
+
+.stat-tab__value {
+  font-variant-numeric: tabular-nums;
+  color: var(--chip-color, #364fc7);
+}
+
+.stat-tab--active {
+  border-color: var(--chip-color, #364fc7);
+  background: #ffffff;
+  color: #212529;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.04);
 }
 
 .poi-list,

@@ -1,7 +1,7 @@
 import Supercluster from 'supercluster';
-import type { Feature, FeatureCollection, Point, Polygon } from 'geojson';
+import type { Feature, FeatureCollection, Point, Polygon, MultiPolygon } from 'geojson';
 import { convertCoord, normalizeCoordSys, type CoordSys } from '../utils/coord';
-import { convex, featureCollection, point as turfPoint } from '@turf/turf';
+import { booleanPointInPolygon, convex, featureCollection, point as turfPoint } from '@turf/turf';
 
 interface GroupRule {
   id: string;
@@ -39,6 +39,7 @@ type ClusterProperties = Supercluster.ClusterProperties & Record<string, unknown
 type PoiFeature = Feature<Point, PoiProperties>;
 type ClusterFeature = Feature<Point, PoiProperties | ClusterProperties>;
 type PolygonFeature = Feature<Polygon, Record<string, unknown>>;
+type IsoPolygonFeature = Feature<Polygon | MultiPolygon, Record<string, unknown>>;
 
 const DEFAULT_RULES: TypeRules = {
   groups: [
@@ -132,6 +133,7 @@ let coordConfig: CoordSysConfig = {
 };
 let groupPoints = new Map<string, RawPoint[]>();
 let groupIndexes = new Map<string, Supercluster<PoiProperties>>();
+let isoIndexes = new Map<string, Supercluster<PoiProperties>>();
 let typeCounts: Record<string, number> = {};
 
 function cleanRawType(raw: string): string {
@@ -370,6 +372,11 @@ function ensureIndex(group: string) {
     return;
   }
   const points = groupPoints.get(group) ?? [];
+  const index = buildIndex(points);
+  groupIndexes.set(group, index);
+}
+
+function buildIndex(points: RawPoint[]) {
   const features: PoiFeature[] = points.map((point) => ({
     type: 'Feature',
     geometry: { type: 'Point', coordinates: [point.lng, point.lat] },
@@ -385,7 +392,65 @@ function ensureIndex(group: string) {
     minZoom: 0
   });
   index.load(features);
-  groupIndexes.set(group, index);
+  return index;
+}
+
+function updateBbox(
+  bbox: [number, number, number, number],
+  coord: [number, number]
+) {
+  const [lng, lat] = coord;
+  if (lng < bbox[0]) bbox[0] = lng;
+  if (lat < bbox[1]) bbox[1] = lat;
+  if (lng > bbox[2]) bbox[2] = lng;
+  if (lat > bbox[3]) bbox[3] = lat;
+}
+
+function updateBboxFromCoords(
+  coords: number[] | number[][] | number[][][] | number[][][][],
+  bbox: [number, number, number, number]
+) {
+  if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+    updateBbox(bbox, [coords[0], coords[1]]);
+    return;
+  }
+  (coords as any[]).forEach((item) => updateBboxFromCoords(item, bbox));
+}
+
+function getPolygonBbox(
+  geometry: Polygon | MultiPolygon
+): [number, number, number, number] | null {
+  const bbox: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity];
+  updateBboxFromCoords(geometry.coordinates as any, bbox);
+  if (!Number.isFinite(bbox[0])) {
+    return null;
+  }
+  return bbox;
+}
+
+function buildIsoIndex(
+  group: string,
+  polygon: IsoPolygonFeature,
+  bbox: [number, number, number, number]
+): RawPoint[] {
+  const basePoints = groupPoints.get(group) ?? [];
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  const candidates = basePoints.filter(
+    (point) =>
+      point.lng >= minLng &&
+      point.lng <= maxLng &&
+      point.lat >= minLat &&
+      point.lat <= maxLat
+  );
+  const inside = candidates.filter((point) =>
+    booleanPointInPolygon([point.lng, point.lat], polygon as any)
+  );
+  isoIndexes.set(group, buildIndex(inside));
+  return inside;
+}
+
+function clearIsochrones() {
+  isoIndexes.clear();
 }
 
 function bboxToPolygon(minLng: number, minLat: number, maxLng: number, maxLat: number): PolygonFeature {
@@ -446,9 +511,12 @@ type IncomingMessage =
         groups: string[];
         includeHull?: boolean;
         requestId: number;
+        useIso?: boolean;
       };
     }
-  | { type: 'EXPAND'; payload: { group: string; clusterId: number; requestId: number } };
+  | { type: 'EXPAND'; payload: { group: string; clusterId: number; requestId: number; useIso?: boolean } }
+  | { type: 'APPLY_ISOCHRONE'; payload: { polygon: IsoPolygonFeature; groups: string[]; requestId: number } }
+  | { type: 'CLEAR_ISOCHRONE' };
 
 self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
   const { type, payload } = event.data;
@@ -493,29 +561,46 @@ self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
     }
 
     if (type === 'QUERY') {
-      const { bbox, zoom, groups, requestId, includeHull } = payload;
+      const { bbox, zoom, groups, requestId, includeHull, useIso } = payload;
       const shouldIncludeHull = Boolean(includeHull);
-      logWorker('query_recv', { requestId, bbox, zoom, groups, includeHull: shouldIncludeHull });
+      const useIsoIndex = Boolean(useIso);
+      logWorker('query_recv', {
+        requestId,
+        bbox,
+        zoom,
+        groups,
+        includeHull: shouldIncludeHull,
+        useIso: useIsoIndex
+      });
       const results: Record<string, { points: FeatureCollection<Point>; hulls: FeatureCollection<Polygon> }> = {};
-      const counts: Record<string, { pointsCount: number; clustersCount: number }> = {};
+      const counts: Record<string, { pointsCount: number; clustersCount: number }> | undefined = DEV_LOG
+        ? {}
+        : undefined;
       groups
         .filter((group) => group && group !== 'address')
         .forEach((group) => {
-          ensureIndex(group);
-          const index = groupIndexes.get(group);
+          if (!useIsoIndex) {
+            ensureIndex(group);
+          }
+          const index = useIsoIndex ? isoIndexes.get(group) : groupIndexes.get(group);
           if (!index) {
             results[group] = {
               points: { type: 'FeatureCollection', features: [] },
               hulls: { type: 'FeatureCollection', features: [] }
             };
-            counts[group] = { pointsCount: 0, clustersCount: 0 };
+            if (counts) {
+              counts[group] = { pointsCount: 0, clustersCount: 0 };
+            }
             return;
           }
           const clusters = index.getClusters(bbox, zoom) as ClusterFeature[];
-          const clustersCount = clusters.filter(
-            (feature) => Boolean((feature.properties as ClusterProperties | undefined)?.cluster)
-          ).length;
-          const pointsCount = clusters.length - clustersCount;
+          if (counts) {
+            const clustersCount = clusters.filter(
+              (feature) => Boolean((feature.properties as ClusterProperties | undefined)?.cluster)
+            ).length;
+            const pointsCount = clusters.length - clustersCount;
+            counts[group] = { pointsCount, clustersCount };
+          }
           const hulls: PolygonFeature[] = [];
           if (shouldIncludeHull && zoom <= HULL_MAX_ZOOM) {
             clusters.forEach((feature) => {
@@ -539,7 +624,6 @@ self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
             points: { type: 'FeatureCollection', features: clusters as Feature<Point, PoiProperties>[] },
             hulls: { type: 'FeatureCollection', features: hulls }
           };
-          counts[group] = { pointsCount, clustersCount };
         });
       self.postMessage({
         type: 'QUERY_RESULT',
@@ -550,14 +634,75 @@ self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
     }
 
     if (type === 'EXPAND') {
-      const { group, clusterId, requestId } = payload;
-      ensureIndex(group);
-      const index = groupIndexes.get(group);
+      const { group, clusterId, requestId, useIso } = payload;
+      const useIsoIndex = Boolean(useIso);
+      if (!useIsoIndex) {
+        ensureIndex(group);
+      }
+      const index = useIsoIndex ? isoIndexes.get(group) : groupIndexes.get(group);
       const zoom = index ? index.getClusterExpansionZoom(clusterId) : null;
       self.postMessage({
         type: 'EXPAND_RESULT',
         payload: { requestId, zoom }
       });
+      return;
+    }
+
+    if (type === 'APPLY_ISOCHRONE') {
+      const { polygon, groups, requestId } = payload;
+      const geometry = polygon?.geometry;
+      if (!geometry || (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon')) {
+        clearIsochrones();
+        self.postMessage({
+          type: 'ISO_INDEX_READY',
+          payload: { requestId, countsByGroup: {}, builtGroups: [], tookMs: 0 }
+        });
+        return;
+      }
+      const bbox = getPolygonBbox(geometry);
+      if (!bbox) {
+        clearIsochrones();
+        self.postMessage({
+          type: 'ISO_INDEX_READY',
+          payload: { requestId, countsByGroup: {}, builtGroups: [], tookMs: 0 }
+        });
+        return;
+      }
+      const countsByGroup: Record<string, number> = {};
+      const pointsByGroup: Record<string, RawPoint[]> = {};
+      const builtGroups: string[] = [];
+      const startedAt = Date.now();
+      groups
+        .filter((group) => group && group !== 'address')
+        .forEach((group) => {
+          const inside = buildIsoIndex(group, polygon, bbox);
+          pointsByGroup[group] = inside;
+          countsByGroup[group] = inside.length;
+          builtGroups.push(group);
+        });
+      self.postMessage({
+        type: 'ISO_INDEX_READY',
+        payload: {
+          requestId,
+          countsByGroup,
+          pointsByGroup,
+          builtGroups,
+          tookMs: Date.now() - startedAt
+        }
+      });
+      logWorker('iso_index_ready', {
+        requestId,
+        groups: builtGroups.length,
+        tookMs: Date.now() - startedAt
+      });
+      return;
+    }
+
+    if (type === 'CLEAR_ISOCHRONE') {
+      clearIsochrones();
+      self.postMessage({ type: 'ISO_CLEARED' });
+      logWorker('iso_cleared');
+      return;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';

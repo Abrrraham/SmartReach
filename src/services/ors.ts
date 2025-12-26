@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { buffer, lineString, point, featureCollection, distance as turfDistance } from '@turf/turf';
-import type { Feature, FeatureCollection, LineString, MultiPolygon, Polygon } from 'geojson';
+import type { Feature, FeatureCollection, LineString, MultiLineString, MultiPolygon, Polygon } from 'geojson';
 import type { TravelProfile } from '../utils/spatial';
 
 interface IsochroneParams {
@@ -8,12 +8,14 @@ interface IsochroneParams {
   lat: number;
   profile: TravelProfile;
   ranges: number[];
+  signal?: AbortSignal;
 }
 
 interface DirectionsParams {
   start: [number, number];
   end: [number, number];
   profile: TravelProfile;
+  signal?: AbortSignal;
 }
 
 interface MatrixParams {
@@ -26,6 +28,32 @@ export interface MatrixResponseShape {
   distances?: number[][];
 }
 
+export interface IsochroneResult {
+  data: FeatureCollection;
+  isFallback: boolean;
+  error?: 'missing_key' | 'service_error';
+}
+
+export interface DirectionsStep {
+  instruction: string;
+  distance: number;
+  duration: number;
+}
+
+export interface DirectionsSummary {
+  distance: number;
+  duration: number;
+}
+
+export interface DirectionsGeojsonResult {
+  data: FeatureCollection;
+  summary?: DirectionsSummary;
+  steps?: DirectionsStep[];
+  isFallback: boolean;
+  error?: 'missing_key' | 'service_error' | 'limit' | 'auth';
+  status?: number;
+}
+
 const ORS_BASE_URL = 'https://api.openrouteservice.org/v2';
 const SPEED_LUT: Record<TravelProfile, number> = {
   'foot-walking': 5,
@@ -36,9 +64,24 @@ const SPEED_LUT: Record<TravelProfile, number> = {
 const orsKey = import.meta.env.VITE_ORS_KEY;
 const hasApiKey = Boolean(orsKey && orsKey.trim().length > 0);
 
-export async function isochrones(params: IsochroneParams): Promise<FeatureCollection> {
+function isAbortError(error: unknown): boolean {
+  if (axios.isCancel?.(error)) {
+    return true;
+  }
+  if (error && typeof error === 'object') {
+    const maybeError = error as { name?: string; code?: string };
+    return maybeError.name === 'CanceledError' || maybeError.code === 'ERR_CANCELED';
+  }
+  return false;
+}
+
+export async function isochrones(params: IsochroneParams): Promise<IsochroneResult> {
   if (!hasApiKey) {
-    return localIsochrones(params);
+    return {
+      data: localIsochrones(params),
+      isFallback: true,
+      error: 'missing_key'
+    };
   }
 
   try {
@@ -47,24 +90,40 @@ export async function isochrones(params: IsochroneParams): Promise<FeatureCollec
       `${ORS_BASE_URL}/isochrones/${profile}`,
       {
         locations: [[lon, lat]],
-        range: ranges
+        range_type: 'time',
+        range: ranges,
+        location_type: 'start',
+        smoothing: 0.5,
+        attributes: ['area']
       },
       {
         headers: {
           Authorization: orsKey,
-          'Content-Type': 'application/json'
-        }
+          'Content-Type': 'application/json; charset=utf-8',
+          Accept: 'application/geo+json, application/json'
+        },
+        signal: params.signal
       }
     );
 
     if (response.data?.features?.length) {
-      return response.data;
+      return {
+        data: response.data,
+        isFallback: false
+      };
     }
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     console.warn('[ors] isochrones fallback triggered', error);
   }
 
-  return localIsochrones(params);
+  return {
+    data: localIsochrones(params),
+    isFallback: true,
+    error: 'service_error'
+  };
 }
 
 export async function directions(params: DirectionsParams): Promise<Feature<LineString>> {
@@ -96,6 +155,86 @@ export async function directions(params: DirectionsParams): Promise<Feature<Line
   }
 
   return localDirections(params);
+}
+
+export async function directionsGeojson(params: DirectionsParams): Promise<DirectionsGeojsonResult> {
+  if (!hasApiKey) {
+    const local = localDirectionsResult(params);
+    return {
+      data: local.data,
+      summary: local.summary,
+      steps: local.steps,
+      isFallback: true,
+      error: 'missing_key'
+    };
+  }
+
+  try {
+    const response = await axios.post<FeatureCollection>(
+      `${ORS_BASE_URL}/directions/${params.profile}/geojson`,
+      {
+        coordinates: [params.start, params.end],
+        preference: 'fastest',
+        instructions: true
+      },
+      {
+        headers: {
+          Authorization: orsKey,
+          'Content-Type': 'application/json; charset=utf-8',
+          Accept: 'application/json, application/geo+json'
+        },
+        signal: params.signal
+      }
+    );
+
+    const feature = response.data?.features?.[0] as Feature<
+      LineString | MultiLineString,
+      Record<string, any>
+    > | undefined;
+    if (feature) {
+      const summary = feature.properties?.summary as DirectionsSummary | undefined;
+      const segments = Array.isArray(feature.properties?.segments)
+        ? feature.properties?.segments
+        : [];
+      const steps = segments
+        .flatMap((segment: any) => Array.isArray(segment?.steps) ? segment.steps : [])
+        .map((step: any) => ({
+          instruction: String(step?.instruction ?? ''),
+          distance: Number(step?.distance ?? 0),
+          duration: Number(step?.duration ?? 0)
+        }))
+        .filter((step: DirectionsStep) => step.instruction);
+      return {
+        data: response.data,
+        summary,
+        steps,
+        isFallback: false
+      };
+    }
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    const local = localDirectionsResult(params);
+    return {
+      data: local.data,
+      summary: local.summary,
+      steps: local.steps,
+      isFallback: true,
+      error: status === 429 ? 'limit' : status === 401 || status === 403 ? 'auth' : 'service_error',
+      status
+    };
+  }
+
+  const local = localDirectionsResult(params);
+  return {
+    data: local.data,
+    summary: local.summary,
+    steps: local.steps,
+    isFallback: true,
+    error: 'service_error'
+  };
 }
 
 export async function matrix(params: MatrixParams): Promise<MatrixResponseShape> {
@@ -139,6 +278,7 @@ function localIsochrones({ lon, lat, profile, ranges }: IsochroneParams): Featur
       return undefined;
     }
     buffered.properties = {
+      value: rangeSeconds,
       contour: rangeSeconds,
       areaKm2: Math.PI * distanceKm * distanceKm
     };
@@ -164,6 +304,20 @@ function localDirections({ start, end, profile }: DirectionsParams): Feature<Lin
     }
   };
   return line;
+}
+
+function localDirectionsResult({ start, end, profile }: DirectionsParams): {
+  data: FeatureCollection;
+  summary?: DirectionsSummary;
+  steps?: DirectionsStep[];
+} {
+  const line = localDirections({ start, end, profile });
+  const summary = (line.properties as { summary?: DirectionsSummary } | undefined)?.summary;
+  return {
+    data: featureCollection([line]),
+    summary,
+    steps: undefined
+  };
 }
 
 function localMatrix({ locations, profile }: MatrixParams): MatrixResponseShape {
