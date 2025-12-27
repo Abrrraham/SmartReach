@@ -24,7 +24,7 @@
         定位南京
       </button>
 
-      <h3>POI 类型 (type_group)</h3>
+      <h3>POI 类型（分类字段）</h3>
       <div class="button-group button-group--row">
         <button type="button" class="button button--ghost" @click="selectAllGroups">全选</button>
         <button type="button" class="button button--ghost" @click="clearGroups">清空</button>
@@ -237,7 +237,7 @@ const sortedGroups = computed(() => {
       id,
       count: counts[id] ?? 0,
       label: GROUP_LABELS[id] ?? id,
-      color: GROUP_COLORS[id] ?? '#868e96'
+      color: GROUP_COLORS[id] ?? GROUP_COLORS.other ?? '#64748b'
     }))
     .sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
 });
@@ -420,10 +420,24 @@ function fitNanjing() {
   flex-direction: column;
   gap: 1.5rem;
   padding: 1.5rem;
-  width: 320px;
-  background: #f8f9fa;
-  border-right: 1px solid #dee2e6;
+  width: 330px;
+  background: var(--panel-bg);
+  border-right: 1px solid var(--border-soft);
+  box-shadow: 10px 0 28px rgba(2, 6, 23, 0.25);
+  backdrop-filter: blur(16px);
   overflow-y: auto;
+  position: relative;
+}
+
+.side-panel::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: -1px;
+  width: 18px;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(10, 16, 30, 0.85), rgba(10, 16, 30, 0));
+  pointer-events: none;
 }
 
 .side-panel__header {
@@ -434,77 +448,138 @@ function fitNanjing() {
 
 .side-panel__subtitle {
   margin: 0;
-  color: #495057;
+  color: var(--text-3);
   font-size: 0.9rem;
 }
 
 .tab-list {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.5rem;
 }
 
 .tab-list__item {
   flex: 1 1 0;
-  border: none;
+  border: 1px solid transparent;
   padding: 0.6rem 0.75rem;
-  background: #e9ecef;
-  color: #495057;
-  border-radius: 0.5rem;
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text-3);
+  border-radius: 999px;
   cursor: pointer;
+  position: relative;
+  transition:
+    color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    transform var(--t-fast) var(--ease-out);
+}
+
+.tab-list__item::after {
+  content: '';
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  bottom: 6px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--brand-500), var(--accent-500));
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 200ms var(--ease-out);
 }
 
 .tab-list__item--active {
-  background: #364fc7;
-  color: #ffffff;
+  background: rgba(var(--brand-rgb), 0.16);
+  color: var(--text-primary);
+  border-color: rgba(var(--brand-rgb), 0.35);
+}
+
+.tab-list__item--active::after {
+  transform: scaleX(1);
+}
+
+.tab-list__item:hover {
+  transform: translateY(-1px);
+  color: var(--text-secondary);
+  border-color: var(--border-strong);
 }
 
 .panel-section {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  animation: tab-fade var(--t-fast) var(--ease-out);
+}
+
+.panel-section h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text-1);
 }
 
 .form-label {
   font-weight: 600;
-  color: #343a40;
+  color: var(--text-secondary);
 }
 
 .text-input,
 .select-input {
   width: 100%;
   padding: 0.5rem 0.75rem;
-  border-radius: 0.5rem;
-  border: 1px solid #ced4da;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.7);
 }
 
 .button {
-  border: none;
-  border-radius: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
   padding: 0.6rem 0.8rem;
   cursor: pointer;
   font-weight: 600;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
 }
 
 .button--primary {
-  background: #4263eb;
-  color: #ffffff;
+  background: var(--gradient-primary);
+  color: var(--text-on-brand);
+  box-shadow: 0 10px 24px rgba(var(--brand-rgb), 0.22);
 }
 
 .button--secondary {
-  background: #ffd43b;
-  color: #343a40;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--text-primary);
+  border-color: rgba(var(--accent-rgb), 0.4);
 }
 
 .button--ghost {
-  background: transparent;
-  border: 1px solid #adb5bd;
-  color: #343a40;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid var(--border-soft);
+  color: var(--text-secondary);
+}
+
+.button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-soft);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .checkbox-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .checkbox-item {
@@ -512,30 +587,65 @@ function fitNanjing() {
   gap: 0.35rem;
   align-items: center;
   font-size: 0.9rem;
-  color: #343a40;
+  color: var(--text-secondary);
+  padding: 0.35rem 0.5rem;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: rgba(15, 23, 42, 0.45);
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    transform var(--t-fast) var(--ease-out);
+}
+
+.checkbox-item:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  background: rgba(15, 23, 42, 0.65);
+}
+
+.checkbox-item input {
+  accent-color: var(--accent-1);
 }
 
 .checkbox-item__dot {
   width: 0.6rem;
   height: 0.6rem;
   border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, 0.1);
+  border: 1px solid var(--border-strong);
 }
 
 .checkbox-item__count {
   margin-left: auto;
   font-size: 0.8rem;
-  color: #868e96;
+  color: var(--text-muted);
 }
 
 .helper-text {
   margin: 0;
   font-size: 0.85rem;
-  color: #868e96;
+  color: var(--text-muted);
+  padding: 0.45rem 0.6rem 0.45rem 1.5rem;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--border-soft);
+  position: relative;
+}
+
+.helper-text::before {
+  content: '';
+  position: absolute;
+  left: 0.6rem;
+  top: 0.65rem;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--info-500);
 }
 
 .helper-text--warn {
-  color: #d9480f;
+  color: var(--warning-500);
+  border-color: rgba(var(--warning-rgb), 0.35);
 }
 
 .slider-group {
@@ -549,7 +659,7 @@ function fitNanjing() {
   flex-direction: column;
   gap: 0.35rem;
   font-size: 0.88rem;
-  color: #495057;
+  color: var(--text-muted);
 }
 
 .slider-group__item input {
@@ -581,9 +691,9 @@ function fitNanjing() {
   display: grid;
   gap: 0.4rem;
   padding: 0.75rem;
-  border-radius: 0.6rem;
-  background: #ffffff;
-  border: 1px solid #e9ecef;
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border-soft);
 }
 
 .bbox-stat {
@@ -591,7 +701,7 @@ function fitNanjing() {
   align-items: center;
   justify-content: space-between;
   font-size: 0.85rem;
-  color: #343a40;
+  color: var(--text-secondary);
 }
 
 .bbox-stat strong {

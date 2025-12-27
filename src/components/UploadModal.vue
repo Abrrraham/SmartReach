@@ -6,7 +6,7 @@
         <button type="button" class="modal__close" @click="close">×</button>
       </header>
       <form class="modal__body" @submit.prevent="submit">
-        <label class="modal__label" for="file-input">选择文件 (GeoJSON / CSV)</label>
+        <label class="modal__label" for="file-input">选择文件（GeoJSON / CSV）</label>
         <input
           id="file-input"
           ref="fileInput"
@@ -68,19 +68,21 @@ async function submit() {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(5, 7, 15, 0.6);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 2rem;
   z-index: 1000;
+  backdrop-filter: blur(6px);
 }
 
 .modal {
   width: min(400px, 100%);
-  background: #ffffff;
-  border-radius: 0.75rem;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+  background: linear-gradient(140deg, rgba(15, 23, 42, 0.95), rgba(12, 20, 35, 0.8));
+  border-radius: 0.9rem;
+  box-shadow: 0 18px 36px rgba(2, 6, 23, 0.45);
+  border: 1px solid var(--border-soft);
   overflow: hidden;
 }
 
@@ -89,8 +91,8 @@ async function submit() {
   align-items: center;
   justify-content: space-between;
   padding: 1rem 1.25rem;
-  background: #364fc7;
-  color: #ffffff;
+  background: var(--gradient-header);
+  color: var(--text-primary);
 }
 
 .modal__close {
@@ -110,13 +112,15 @@ async function submit() {
 
 .modal__label {
   font-weight: 600;
-  color: #343a40;
+  color: var(--text-secondary);
 }
 
 .modal__input {
-  border: 1px solid #ced4da;
-  border-radius: 0.5rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
   padding: 0.6rem 0.75rem;
+  background: rgba(15, 23, 42, 0.7);
+  color: var(--text-primary);
 }
 
 .modal__actions {
@@ -126,21 +130,32 @@ async function submit() {
 }
 
 .button {
-  border-radius: 0.5rem;
-  border: none;
+  border-radius: 999px;
+  border: 1px solid transparent;
   padding: 0.6rem 0.9rem;
   cursor: pointer;
   font-weight: 600;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
 }
 
 .button--ghost {
-  background: transparent;
-  color: #495057;
-  border: 1px solid #adb5bd;
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--text-primary);
+  border: 1px solid var(--border-soft);
 }
 
 .button--primary {
-  background: #4263eb;
-  color: #ffffff;
+  background: var(--gradient-primary);
+  color: var(--text-on-brand);
+  box-shadow: 0 12px 24px rgba(var(--brand-rgb), 0.28);
+}
+
+.button:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-soft);
 }
 </style>

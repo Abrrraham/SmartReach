@@ -23,7 +23,7 @@ import type { FeatureCollection, Point, Polygon } from 'geojson';
 import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
 import { buildAmapRasterStyle } from '../services/style';
-import { GROUP_COLORS } from '../utils/poiGroups';
+import { GROUP_ALPHA, GROUP_COLORS, GROUP_COLORS_DARK, GROUP_COLORS_LIGHT } from '../utils/poiGroups';
 import MapHintBar from './MapHintBar.vue';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import '@maplibre/maplibre-gl-geocoder/dist/maplibre-gl-geocoder.css';
@@ -124,6 +124,15 @@ const ISO_VALUE_EXPR: ExpressionSpecification = [
   0
 ];
 
+const MAP_COLORS = {
+  brand: '#38bdf8',
+  accent: '#8b5cf6',
+  info: '#22d3ee',
+  warning: '#f59e0b',
+  danger: '#fb7185',
+  neutralStroke: 'rgba(6, 10, 20, 0.75)'
+};
+
 const emit = defineEmits<{
   (event: 'click-poi', poi: POI): void;
   (event: 'map-click', coordinates: [number, number]): void;
@@ -143,6 +152,28 @@ let bboxDragElement: HTMLDivElement | null = null;
 let bboxDragging = false;
 let bboxDragRaf = 0;
 let bboxDragPending: { x: number; y: number } | null = null;
+
+function triggerMapFeedback(
+  coordinate: { lng: number; lat: number },
+  variant: 'ripple' | 'bounce'
+) {
+  const map = mapInstance.value;
+  const container = mapContainer.value;
+  if (!map || !container) return;
+  const point = map.project([coordinate.lng, coordinate.lat]);
+  const el = document.createElement('div');
+  el.className = `map-feedback map-feedback--${variant}`;
+  el.style.left = `${point.x}px`;
+  el.style.top = `${point.y}px`;
+  container.appendChild(el);
+  const cleanup = () => {
+    if (el.parentNode) {
+      el.parentNode.removeChild(el);
+    }
+  };
+  el.addEventListener('animationend', cleanup);
+  window.setTimeout(cleanup, 700);
+}
 
 function scheduleViewportQuery() {
   if (viewportTimer) {
@@ -489,7 +520,9 @@ function removeHullLayers(map: MaplibreMap, group: string) {
 
 function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean) {
   const hasGroup = activeGroups.has(group);
-  const color = GROUP_COLORS[group] ?? '#868e96';
+  const color = GROUP_COLORS[group] ?? GROUP_COLORS.other ?? '#64748b';
+  const colorLight = GROUP_COLORS_LIGHT[group] ?? color;
+  const colorDark = GROUP_COLORS_DARK[group] ?? color;
   const pointId = pointSourceId(group);
   const hullId = hullSourceId(group);
   if (!map.getSource(pointId)) {
@@ -515,7 +548,7 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
       source: hullId,
       paint: {
         'fill-color': color,
-        'fill-opacity': 0.15
+        'fill-opacity': GROUP_ALPHA.fill
       }
     });
   }
@@ -525,8 +558,9 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
       type: 'line',
       source: hullId,
       paint: {
-        'line-color': color,
-        'line-width': 1
+        'line-color': colorDark,
+        'line-width': 1.2,
+        'line-opacity': 0.75
       }
     });
   }
@@ -538,10 +572,10 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
       source: pointId,
       filter: ['has', 'point_count'],
       paint: {
-        'circle-color': color,
+        'circle-color': colorLight,
         'circle-radius': CLUSTER_HALO_EXPR,
-        'circle-opacity': 0.2,
-        'circle-blur': 0.8
+        'circle-opacity': 0.18,
+        'circle-blur': 0.85
       }
     });
   }
@@ -554,10 +588,10 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
       paint: {
         'circle-color': color,
         'circle-radius': CLUSTER_RADIUS_EXPR,
-        'circle-opacity': 0.65,
-        'circle-stroke-color': '#ffffff',
-        'circle-stroke-width': 2,
-        'circle-stroke-opacity': 0.9
+        'circle-opacity': 0.75,
+        'circle-stroke-color': colorDark,
+        'circle-stroke-width': 1.6,
+        'circle-stroke-opacity': 0.75
       }
     });
   }
@@ -574,8 +608,8 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
       },
       paint: {
         'text-color': '#ffffff',
-        'text-halo-color': 'rgba(0,0,0,0.35)',
-        'text-halo-width': 1.4
+        'text-halo-color': 'rgba(6, 10, 20, 0.65)',
+        'text-halo-width': 1.6
       }
     });
   }
@@ -586,9 +620,10 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
       source: pointId,
       filter: ['!', ['has', 'point_count']],
       paint: {
-        'circle-radius': 6,
-        'circle-stroke-width': 2,
-        'circle-stroke-color': '#ffffff',
+        'circle-radius': 5.5,
+        'circle-stroke-width': 1.6,
+        'circle-stroke-color': MAP_COLORS.neutralStroke,
+        'circle-stroke-opacity': 0.8,
         'circle-color': color
       }
     });
@@ -724,8 +759,18 @@ function ensureIsochroneLayers(map: MaplibreMap) {
       type: 'fill',
       source: ISOCHRONE_SOURCE_ID,
       paint: {
-        'fill-color': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, '#748ffc', 600, '#5c7cfa', 900, '#364fc7'],
-        'fill-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.35, 900, 0.12]
+        'fill-color': [
+          'interpolate',
+          ['linear'],
+          ISO_VALUE_EXPR,
+          300,
+          '#7dd3fc',
+          600,
+          MAP_COLORS.brand,
+          900,
+          '#0ea5e9'
+        ],
+        'fill-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.28, 900, 0.12]
       }
     });
 
@@ -734,8 +779,8 @@ function ensureIsochroneLayers(map: MaplibreMap) {
       type: 'line',
       source: ISOCHRONE_SOURCE_ID,
       paint: {
-        'line-color': '#364fc7',
-        'line-width': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 2.4, 900, 1.2],
+        'line-color': MAP_COLORS.brand,
+        'line-width': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 2.2, 900, 1.1],
         'line-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.8, 900, 0.4]
       }
     });
@@ -755,8 +800,8 @@ function ensureIsoOriginLayers(map: MaplibreMap) {
       source: ISO_ORIGIN_SOURCE_ID,
       paint: {
         'circle-radius': 14,
-        'circle-color': '#74c0fc',
-        'circle-opacity': 0.25
+        'circle-color': '#7dd3fc',
+        'circle-opacity': 0.22
       }
     });
 
@@ -766,9 +811,10 @@ function ensureIsoOriginLayers(map: MaplibreMap) {
       source: ISO_ORIGIN_SOURCE_ID,
       paint: {
         'circle-radius': 8,
-        'circle-color': '#1c7ed6',
+        'circle-color': MAP_COLORS.brand,
         'circle-stroke-width': 2,
-        'circle-stroke-color': '#ffffff'
+        'circle-stroke-color': MAP_COLORS.neutralStroke,
+        'circle-stroke-opacity': 0.8
       }
     });
 
@@ -783,8 +829,8 @@ function ensureIsoOriginLayers(map: MaplibreMap) {
         'text-offset': [0, 1.2]
       },
       paint: {
-        'text-color': '#1c7ed6',
-        'text-halo-color': '#ffffff',
+        'text-color': MAP_COLORS.brand,
+        'text-halo-color': 'rgba(6, 10, 20, 0.75)',
         'text-halo-width': 1.2
       }
     });
@@ -803,9 +849,9 @@ function ensureRouteLayer(map: MaplibreMap) {
       type: 'line',
       source: ROUTE_SOURCE_ID,
       paint: {
-        'line-color': '#ffffff',
+        'line-color': 'rgba(6, 10, 20, 0.7)',
         'line-width': ['interpolate', ['linear'], ['zoom'], 10, 6, 14, 10],
-        'line-opacity': 0.9
+        'line-opacity': 0.8
       }
     });
 
@@ -814,9 +860,9 @@ function ensureRouteLayer(map: MaplibreMap) {
       type: 'line',
       source: ROUTE_SOURCE_ID,
       paint: {
-        'line-color': '#ff922b',
+        'line-color': MAP_COLORS.warning,
         'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 6],
-        'line-opacity': 0.8
+        'line-opacity': 0.9
       }
     });
   }
@@ -835,8 +881,8 @@ function ensureRouteEndpointLayer(map: MaplibreMap) {
       source: ROUTE_ENDPOINT_SOURCE_ID,
       paint: {
         'circle-radius': 12,
-        'circle-color': '#ffd8a8',
-        'circle-opacity': 0.35
+        'circle-color': '#fed7aa',
+        'circle-opacity': 0.28
       }
     });
 
@@ -846,9 +892,10 @@ function ensureRouteEndpointLayer(map: MaplibreMap) {
       source: ROUTE_ENDPOINT_SOURCE_ID,
       paint: {
         'circle-radius': 7,
-        'circle-color': '#ff922b',
+        'circle-color': MAP_COLORS.warning,
         'circle-stroke-width': 2,
-        'circle-stroke-color': '#ffffff'
+        'circle-stroke-color': MAP_COLORS.neutralStroke,
+        'circle-stroke-opacity': 0.8
       }
     });
   }
@@ -865,7 +912,7 @@ function ensureSiteBboxLayers(map: MaplibreMap) {
       type: 'fill',
       source: SITE_BBOX_SOURCE_ID,
       paint: {
-        'fill-color': '#5c7cfa',
+        'fill-color': MAP_COLORS.accent,
         'fill-opacity': 0.12
       }
     });
@@ -874,8 +921,9 @@ function ensureSiteBboxLayers(map: MaplibreMap) {
       type: 'line',
       source: SITE_BBOX_SOURCE_ID,
       paint: {
-        'line-color': '#364fc7',
-        'line-width': 2
+        'line-color': '#a855f7',
+        'line-width': 2.2,
+        'line-opacity': 0.85
       }
     });
   }
@@ -927,9 +975,10 @@ function ensureSiteResultLayers(map: MaplibreMap) {
       source: SITE_RESULT_SOURCE_ID,
       paint: {
         'circle-radius': 8,
-        'circle-color': '#ff6b6b',
-        'circle-stroke-color': '#ffffff',
-        'circle-stroke-width': 2
+        'circle-color': '#f472b6',
+        'circle-stroke-color': MAP_COLORS.neutralStroke,
+        'circle-stroke-width': 2,
+        'circle-stroke-opacity': 0.8
       }
     });
     map.addLayer({
@@ -939,10 +988,10 @@ function ensureSiteResultLayers(map: MaplibreMap) {
       filter: ['==', ['get', 'rank'], -1],
       paint: {
         'circle-radius': 12,
-        'circle-color': '#ffd43b',
-        'circle-stroke-color': '#ffffff',
+        'circle-color': '#fbbf24',
+        'circle-stroke-color': MAP_COLORS.neutralStroke,
         'circle-stroke-width': 2.5,
-        'circle-opacity': 0.85
+        'circle-opacity': 0.9
       }
     });
     map.addLayer({
@@ -957,8 +1006,8 @@ function ensureSiteResultLayers(map: MaplibreMap) {
       },
       paint: {
         'text-color': '#ffffff',
-        'text-halo-color': 'rgba(0,0,0,0.35)',
-        'text-halo-width': 1.2
+        'text-halo-color': 'rgba(6, 10, 20, 0.65)',
+        'text-halo-width': 1.4
       }
     });
   }
@@ -1010,6 +1059,9 @@ function focusSiteResult(rank: number | null) {
   map.easeTo({
     center: [target.lng, target.lat],
     zoom: nextZoom
+  });
+  map.once('moveend', () => {
+    triggerMapFeedback({ lng: target.lng, lat: target.lat }, 'ripple');
   });
 }
 
@@ -1389,6 +1441,13 @@ watch(
   () => analysis.value.isochrone,
   (geojson) => {
     setIsochrones(geojson);
+    if (geojson && isoEngine.value.origin) {
+      requestAnimationFrame(() => {
+        if (isoEngine.value.origin) {
+          triggerMapFeedback(isoEngine.value.origin, 'bounce');
+        }
+      });
+    }
   }
 );
 
@@ -1499,37 +1558,52 @@ defineExpose({
 
 :deep(.bbox-preview) {
   position: absolute;
-  border: 2px dashed #4c6ef5;
-  background: rgba(76, 110, 245, 0.15);
+  border: 2px dashed rgba(var(--brand-rgb), 0.8);
+  background: rgba(var(--brand-rgb), 0.15);
   pointer-events: none;
   z-index: 15;
 }
 
-:deep(.maplibregl-ctrl-geocoder) {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
+:deep(.map-feedback) {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 16;
 }
 
-:deep(.maplibregl-ctrl-geocoder--pin-right) {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
+:deep(.map-feedback--ripple) {
+  border: 1px solid rgba(var(--brand-rgb), 0.85);
+  animation: map-ripple 300ms var(--ease-out);
 }
 
-:deep(.map-geocoder-search-button) {
-  border: 1px solid #adb5bd;
-  background: #ffffff;
-  border-radius: 0.45rem;
-  padding: 0 0.55rem;
-  height: 28px;
-  line-height: 26px;
-  font-size: 0.85rem;
-  color: #343a40;
-  cursor: pointer;
+:deep(.map-feedback--bounce) {
+  background: rgba(var(--brand-rgb), 0.85);
+  animation: map-bounce 250ms var(--ease-out);
 }
 
-:deep(.map-geocoder-search-button:hover) {
-  background: #f1f3f5;
+@keyframes map-ripple {
+  from {
+    transform: translate(-50%, -50%) scale(0.4);
+    opacity: 0.9;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes map-bounce {
+  0% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    transform: translate(-50%, -62%) scale(1.12);
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
 }
 </style>

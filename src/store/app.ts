@@ -307,7 +307,7 @@ export const useAppStore = defineStore('app', () => {
         id: groupId,
         label: GROUP_LABELS[groupId] ?? groupId,
         count: Number(count) || 0,
-        color: GROUP_COLORS[groupId] ?? '#868e96',
+        color: GROUP_COLORS[groupId] ?? GROUP_COLORS.other ?? '#64748b',
         order: GROUP_ORDER.indexOf(groupId)
       }))
       .sort((a, b) => {

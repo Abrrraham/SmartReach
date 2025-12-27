@@ -21,12 +21,19 @@ const defaultCity = computed(() => (import.meta.env.VITE_DEFAULT_CITY as string)
 
 <style scoped>
 .header-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem 1.5rem;
-  background: #364fc7;
-  color: #ffffff;
+  padding: 1rem 1.75rem;
+  background:
+    linear-gradient(135deg, rgba(var(--brand-rgb), 0.12), rgba(var(--accent-rgb), 0.18)),
+    rgba(12, 20, 35, 0.92);
+  border-bottom: 1px solid var(--border-soft);
+  box-shadow: 0 14px 28px rgba(2, 6, 23, 0.35);
+  backdrop-filter: blur(16px);
 }
 
 .header-bar__branding {
@@ -37,27 +44,45 @@ const defaultCity = computed(() => (import.meta.env.VITE_DEFAULT_CITY as string)
 
 .header-bar__title {
   margin: 0;
-  font-size: 1.25rem;
+  font-size: 1.35rem;
+  letter-spacing: 0.4px;
 }
 
 .header-bar__subtitle {
   margin: 0;
   font-size: 0.85rem;
-  opacity: 0.85;
+  color: var(--text-muted);
 }
 
 .header-bar__nav {
   display: flex;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .header-bar__link {
-  color: #ffffff;
+  color: var(--text-secondary);
   text-decoration: none;
   font-weight: 600;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
 }
 
 .header-bar__link.router-link-active {
-  text-decoration: underline;
+  background: rgba(var(--brand-rgb), 0.16);
+  border-color: rgba(var(--brand-rgb), 0.35);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(var(--brand-rgb), 0.15);
+}
+
+.header-bar__link:hover {
+  transform: translateY(-1px);
+  background: rgba(15, 23, 42, 0.6);
+  border-color: var(--border-strong);
 }
 </style>

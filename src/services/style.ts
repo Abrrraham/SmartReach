@@ -1,3 +1,5 @@
+import type { StyleSpecification } from 'maplibre-gl';
+
 const CATEGORY_COLORS: Record<string, string> = {
   medical: '#e03131',
   pharmacy: '#2f9e44',
@@ -17,6 +19,15 @@ const CATEGORY_COLORS: Record<string, string> = {
 export function getCategoryColor(category: string): string {
   return CATEGORY_COLORS[category] ?? CATEGORY_COLORS.other;
 }
+
+const AMAP_RASTER_TUNE = {
+  // Visual tuning for dark UI background; adjust if needed.
+  saturation: -0.45,
+  contrast: 0.18,
+  brightnessMin: 0.08,
+  brightnessMax: 0.78,
+  hueRotate: -8
+};
 
 export function buildAmapRasterStyle(): StyleSpecification {
   return {
@@ -41,9 +52,15 @@ export function buildAmapRasterStyle(): StyleSpecification {
       {
         id: 'amap-raster',
         type: 'raster',
-        source: 'amap-raster'
+        source: 'amap-raster',
+        paint: {
+          'raster-saturation': AMAP_RASTER_TUNE.saturation,
+          'raster-contrast': AMAP_RASTER_TUNE.contrast,
+          'raster-brightness-min': AMAP_RASTER_TUNE.brightnessMin,
+          'raster-brightness-max': AMAP_RASTER_TUNE.brightnessMax,
+          'raster-hue-rotate': AMAP_RASTER_TUNE.hueRotate
+        }
       }
     ]
   };
 }
-import type { StyleSpecification } from 'maplibre-gl';

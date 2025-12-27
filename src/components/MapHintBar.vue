@@ -26,9 +26,9 @@ const emit = defineEmits<{
   gap: 0.5rem;
   padding: 0.5rem 0.9rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 8px 16px rgba(33, 37, 41, 0.12);
-  color: #343a40;
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: 0 12px 24px rgba(2, 6, 23, 0.35);
+  color: var(--text-primary);
   font-size: 0.9rem;
   pointer-events: none;
   z-index: 20;
@@ -40,9 +40,9 @@ const emit = defineEmits<{
 
 .map-hint__cancel {
   pointer-events: auto;
-  border: none;
-  background: #364fc7;
-  color: #ffffff;
+  border: 1px solid rgba(var(--brand-rgb), 0.4);
+  background: rgba(var(--brand-rgb), 0.2);
+  color: var(--text-primary);
   border-radius: 999px;
   padding: 0.2rem 0.7rem;
   font-size: 0.85rem;

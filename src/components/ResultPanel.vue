@@ -1,5 +1,5 @@
 <template>
-  <aside class="result-panel" aria-label="结果面板">
+  <aside class="result-panel card-glass" aria-label="结果面板">
     <div class="result-tabs" role="tablist" aria-label="结果切换">
       <button
         type="button"
@@ -23,7 +23,12 @@
       </button>
     </div>
 
-    <section v-show="ui.rightTab === 'iso'" class="result-section" aria-label="路线规划">
+    <section
+      v-show="ui.rightTab === 'iso'"
+      class="result-section"
+      :class="{ 'result-section--active': ui.rightTab === 'iso' }"
+      aria-label="路线规划"
+    >
       <header class="result-section__header">
         <h3>路线规划</h3>
         <button
@@ -68,7 +73,12 @@
         </div>
       </template>
     </section>
-    <section v-show="ui.rightTab === 'site'" class="result-section" aria-label="候选点 Top10">
+    <section
+      v-show="ui.rightTab === 'site'"
+      class="result-section"
+      :class="{ 'result-section--active': ui.rightTab === 'site' }"
+      aria-label="候选点 Top10"
+    >
       <header class="result-section__header">
         <h3>候选点 Top10</h3>
         <span class="result-section__meta">{{ siteEngine.results.length }} 项</span>
@@ -131,7 +141,8 @@
               {{ siteEngine.expandedRanks[item.rank] ? '收起解释' : '展开解释' }}
             </button>
           </div>
-          <div v-if="siteEngine.expandedRanks[item.rank]" class="site-explain">
+          <Transition name="collapse">
+            <div v-if="siteEngine.expandedRanks[item.rank]" class="site-explain">
             <div class="site-explain__header">
               <strong>分项解释</strong>
               <span class="site-explain__score">总分 {{ formatScore(item.total) }}</span>
@@ -139,15 +150,23 @@
             <div v-for="key in metricKeys" :key="key" class="metric-row">
               <span class="metric-label">{{ metricLabels[key] }}</span>
               <div class="metric-bar">
-                <span class="metric-bar__fill" :style="{ width: `${metricValue(item, key)}%` }" />
+                <span
+                  class="metric-bar__fill"
+                  :style="{ '--metric-scale': metricValue(item, key) / 100 }"
+                />
               </div>
               <span class="metric-value">{{ metricValue(item, key).toFixed(0) }}%</span>
             </div>
-          </div>
+            </div>
+          </Transition>
         </li>
       </ul>
     </section>
-    <section v-show="ui.rightTab === 'iso'" class="result-section">
+    <section
+      v-show="ui.rightTab === 'iso'"
+      class="result-section"
+      :class="{ 'result-section--active': ui.rightTab === 'iso' }"
+    >
       <header class="result-section__header">
         <h3>等时圈统计</h3>
         <span v-if="analysis.isochrone" class="badge">已生成</span>
@@ -174,7 +193,11 @@
       <p v-else class="helper-text">请先生成等时圈查看统计。</p>
     </section>
 
-    <section v-show="ui.rightTab === 'iso'" class="result-section">
+    <section
+      v-show="ui.rightTab === 'iso'"
+      class="result-section"
+      :class="{ 'result-section--active': ui.rightTab === 'iso' }"
+    >
       <header class="result-section__header">
         <h3>
           圈内 POI · {{ activeGroupStat?.label ?? '未选择分类' }}（{{ activeGroupStat?.count ?? 0 }} 条）
@@ -384,12 +407,26 @@ function formatDuration(duration: number) {
 .result-panel {
   display: flex;
   flex-direction: column;
-  width: 320px;
+  width: 330px;
   padding: 1.5rem;
   gap: 1.5rem;
-  border-left: 1px solid #dee2e6;
-  background: #ffffff;
+  border-left: 1px solid var(--border-soft);
+  background: var(--panel-bg);
   overflow-y: auto;
+  box-shadow: -10px 0 28px rgba(2, 6, 23, 0.25);
+  backdrop-filter: blur(16px);
+  position: relative;
+}
+
+.result-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -1px;
+  width: 18px;
+  height: 100%;
+  background: linear-gradient(270deg, rgba(10, 16, 30, 0.85), rgba(10, 16, 30, 0));
+  pointer-events: none;
 }
 
 .result-tabs {
@@ -399,25 +436,58 @@ function formatDuration(duration: number) {
 }
 
 .result-tab {
-  border: 1px solid #dee2e6;
-  border-radius: 0.6rem;
-  background: #f8f9fa;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.65);
   padding: 0.55rem 0.75rem;
   font-weight: 600;
-  color: #495057;
+  color: var(--text-muted);
   cursor: pointer;
+  position: relative;
+  transition:
+    color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out),
+    transform var(--t-fast) var(--ease-out);
+}
+
+.result-tab::after {
+  content: '';
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  bottom: 6px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--brand-500), var(--accent-500));
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 200ms var(--ease-out);
 }
 
 .result-tab--active {
-  border-color: #4c6ef5;
-  background: #edf2ff;
-  color: #364fc7;
+  border-color: rgba(var(--brand-rgb), 0.35);
+  background: rgba(var(--brand-rgb), 0.16);
+  color: var(--text-primary);
+}
+
+.result-tab--active::after {
+  transform: scaleX(1);
+}
+
+.result-tab:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
 }
 
 .result-section {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+.result-section--active {
+  animation: tab-fade var(--t-fast) var(--ease-out);
 }
 
 .result-section__header {
@@ -427,21 +497,48 @@ function formatDuration(duration: number) {
   gap: 0.5rem;
 }
 
+.result-section h3,
+.result-section h4 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
 .result-section__meta {
-  color: #868e96;
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
 .helper-text {
   margin: 0;
   font-size: 0.85rem;
-  color: #868e96;
+  color: var(--text-muted);
+  padding: 0.45rem 0.6rem 0.45rem 1.5rem;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--border-soft);
+  position: relative;
+}
+
+.helper-text::before {
+  content: '';
+  position: absolute;
+  left: 0.6rem;
+  top: 0.65rem;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--info-500);
+}
+
+.helper-text--warn {
+  color: var(--warning-500);
+  border-color: rgba(var(--warning-rgb), 0.35);
 }
 
 .route-summary {
   margin: 0;
   font-size: 0.9rem;
-  color: #343a40;
+  color: var(--text-secondary);
 }
 
 .route-steps {
@@ -455,7 +552,7 @@ function formatDuration(duration: number) {
   padding-left: 1.2rem;
   display: grid;
   gap: 0.35rem;
-  color: #495057;
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -471,12 +568,16 @@ function formatDuration(duration: number) {
   gap: 0.45rem;
   padding: 0.35rem 0.7rem;
   border-radius: 999px;
-  border: 1px solid #e9ecef;
-  background: #f1f3f5;
-  color: #495057;
+  border: 1px solid var(--border-soft);
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text-secondary);
   font-size: 0.85rem;
   cursor: pointer;
   font-family: inherit;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
 }
 
 .stat-tab__dot {
@@ -484,7 +585,7 @@ function formatDuration(duration: number) {
   height: 0.5rem;
   border-radius: 999px;
   background: var(--chip-color, #364fc7);
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.5);
 }
 
 .stat-tab__label {
@@ -497,10 +598,14 @@ function formatDuration(duration: number) {
 }
 
 .stat-tab--active {
-  border-color: var(--chip-color, #364fc7);
-  background: #ffffff;
-  color: #212529;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.04);
+  border-color: var(--chip-color, #38bdf8);
+  background: rgba(15, 23, 42, 0.75);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px rgba(var(--brand-rgb), 0.18);
+}
+
+.stat-tab:hover {
+  transform: translateY(-1px);
 }
 
 .poi-list,
@@ -516,9 +621,20 @@ function formatDuration(duration: number) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: #f8f9fa;
+  background: rgba(15, 23, 42, 0.55);
   padding: 0.75rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.poi-list__item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(var(--brand-rgb), 0.35);
+  box-shadow: var(--shadow-soft);
 }
 
 .poi-list__info {
@@ -528,7 +644,7 @@ function formatDuration(duration: number) {
 }
 
 .poi-list__meta {
-  color: #868e96;
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -543,9 +659,21 @@ function formatDuration(duration: number) {
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.75rem;
-  border-radius: 0.6rem;
-  border: 1px solid #e9ecef;
-  background: #f8f9fa;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: linear-gradient(160deg, rgba(15, 23, 42, 0.7), rgba(15, 23, 42, 0.45));
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out),
+    background var(--t-fast) var(--ease-out);
+}
+
+.site-result-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(var(--brand-rgb), 0.35);
+  box-shadow: var(--shadow-soft);
+  background: linear-gradient(160deg, rgba(15, 23, 42, 0.8), rgba(8, 15, 30, 0.55));
 }
 
 .site-result-item__main {
@@ -557,8 +685,12 @@ function formatDuration(duration: number) {
 }
 
 .site-result-item--active {
-  border-color: #339af0;
-  background: #e7f5ff;
+  border-color: rgba(var(--brand-rgb), 0.55);
+  background: linear-gradient(
+    160deg,
+    rgba(var(--brand-rgb), 0.18),
+    rgba(var(--accent-rgb), 0.16)
+  );
 }
 
 .site-result-item__rank {
@@ -568,8 +700,8 @@ function formatDuration(duration: number) {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: #364fc7;
-  color: #ffffff;
+  background: linear-gradient(120deg, var(--brand-500), var(--accent-500));
+  color: var(--text-on-accent);
   font-size: 0.85rem;
   font-weight: 700;
 }
@@ -582,12 +714,20 @@ function formatDuration(duration: number) {
 
 .site-result-item__meta {
   font-size: 0.8rem;
-  color: #868e96;
+  color: var(--text-muted);
 }
 
 .site-result-item__toggle {
   padding: 0.3rem 0.6rem;
   font-size: 0.75rem;
+  opacity: 0.5;
+  transition: opacity var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out);
+}
+
+.site-result-item:hover .site-result-item__toggle,
+.site-result-item:focus-within .site-result-item__toggle {
+  opacity: 1;
+  transform: translateX(-2px);
 }
 
 .site-explain {
@@ -596,9 +736,10 @@ function formatDuration(duration: number) {
   gap: 0.6rem;
   margin-left: 1.6rem;
   padding: 0.6rem 0.75rem;
-  border-radius: 0.6rem;
-  background: #f1f3f5;
-  border: 1px solid #e9ecef;
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border-soft);
+  overflow: hidden;
 }
 
 .site-explain__header {
@@ -606,12 +747,12 @@ function formatDuration(duration: number) {
   align-items: center;
   justify-content: space-between;
   font-size: 0.85rem;
-  color: #495057;
+  color: var(--text-secondary);
 }
 
 .site-explain__score {
   font-weight: 600;
-  color: #364fc7;
+  color: var(--brand-500);
 }
 
 .metric-row {
@@ -620,7 +761,7 @@ function formatDuration(duration: number) {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.85rem;
-  color: #495057;
+  color: var(--text-muted);
 }
 
 .metric-label {
@@ -630,7 +771,7 @@ function formatDuration(duration: number) {
 .metric-bar {
   position: relative;
   height: 8px;
-  background: #e9ecef;
+  background: rgba(148, 163, 184, 0.2);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -638,7 +779,11 @@ function formatDuration(duration: number) {
 .metric-bar__fill {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, #4dabf7, #339af0);
+  width: 100%;
+  transform: scaleX(var(--metric-scale, 0));
+  transform-origin: left center;
+  background: linear-gradient(90deg, rgba(var(--brand-rgb), 0.9), rgba(var(--accent-rgb), 0.85));
+  transition: transform 400ms var(--ease-out);
 }
 
 .metric-value {
@@ -647,33 +792,82 @@ function formatDuration(duration: number) {
 }
 
 .button {
-  border: none;
-  background: none;
+  border: 1px solid transparent;
+  background: rgba(15, 23, 42, 0.4);
   cursor: pointer;
   font-weight: 600;
-  color: #4263eb;
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 0.4rem 0.8rem;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
 }
 
 .button--link {
   padding: 0;
+  border: none;
+  background: none;
+  color: var(--brand-500);
 }
 
 .button--ghost {
-  border: 1px solid #4263eb;
-  border-radius: 0.5rem;
-  padding: 0.4rem 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(15, 23, 42, 0.45);
 }
 
 .badge {
   border-radius: 999px;
-  background: #51cf66;
-  color: #ffffff;
+  background: rgba(var(--success-rgb), 0.18);
+  color: var(--success-100);
   padding: 0.2rem 0.6rem;
   font-size: 0.75rem;
   font-weight: 600;
+  border: 1px solid rgba(var(--success-rgb), 0.4);
 }
 
 .badge--muted {
-  background: #adb5bd;
+  background: rgba(148, 163, 184, 0.22);
+  color: var(--text-muted);
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(var(--brand-rgb), 0.35);
+  box-shadow: var(--shadow-soft);
+  color: var(--text-primary);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.collapse-enter-active,
+.collapse-leave-active {
+  transition: max-height 280ms var(--ease-out), opacity 280ms var(--ease-out);
+}
+
+.collapse-enter-from,
+.collapse-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+
+.collapse-enter-to,
+.collapse-leave-from {
+  max-height: 300px;
+  opacity: 1;
+}
+
+.collapse-enter-from .metric-bar__fill {
+  transform: scaleX(0);
+}
+
+.collapse-enter-to .metric-bar__fill {
+  transform: scaleX(var(--metric-scale, 0));
 }
 </style>
