@@ -3,7 +3,6 @@
     <HeaderBar />
     <div class="workbench__body">
       <SidePanel
-        @request-isochrone="handleGenerateIsochrone"
         @export-poi-csv="exportPoiCsv"
         @export-candidate-csv="exportCandidateCsv"
         @export-map-png="exportMapPng"
@@ -11,11 +10,7 @@
         @upload="handleUpload"
       />
       <main class="workbench__map">
-        <MapView
-          ref="mapViewRef"
-          @map-click="handleMapClick"
-          @click-poi="handlePoiClick"
-        />
+        <MapView ref="mapViewRef" @click-poi="handlePoiClick" />
       </main>
       <ResultPanel @navigate="handlePoiClick" />
     </div>
@@ -34,20 +29,9 @@ import { useAppStore } from '../store/app';
 import type { POI } from '../types/poi';
 
 const mapViewRef = ref<InstanceType<typeof MapView> | null>(null);
-const lastOrigin = ref<[number, number] | null>(null);
 
 const store = useAppStore();
 const { data, filters, visiblePoisInIsochrone } = storeToRefs(store);
-
-function handleMapClick(coordinates: [number, number]) {
-  lastOrigin.value = coordinates;
-  store.setIsoOriginFromMapClick(coordinates[0], coordinates[1]);
-  store.generateIsochrones();
-}
-
-function handleGenerateIsochrone() {
-  store.generateIsochrones();
-}
 
 function handlePoiClick(poi: POI) {
   store.planRouteToPoi(poi);

@@ -1,64 +1,29 @@
 <template>
   <aside class="result-panel" aria-label="结果面板">
-    <section class="result-section">
-      <header class="result-section__header">
-        <h3>等时圈统计</h3>
-        <span v-if="analysis.isochrone" class="badge">已生成</span>
-        <span v-else class="badge badge--muted">未生成</span>
-      </header>
-      <div class="stat-tabs">
-        <button
-          v-for="item in isoGroupStatsSorted"
-          :key="item.id"
-          type="button"
-          class="stat-tab"
-          :class="{ 'stat-tab--active': item.id === ui.activeIsoGroupId }"
-          :style="{ '--chip-color': item.color }"
-          @click="setActiveIsoGroup(item.id)"
-        >
-          <span class="stat-tab__label">{{ item.label }}</span>
-          <span class="stat-tab__value">{{ item.count }}</span>
-        </button>
-      </div>
-    </section>
+    <div class="result-tabs" role="tablist" aria-label="结果切换">
+      <button
+        type="button"
+        class="result-tab"
+        role="tab"
+        :aria-selected="ui.rightTab === 'iso'"
+        :class="{ 'result-tab--active': ui.rightTab === 'iso' }"
+        @click="setRightTab('iso')"
+      >
+        等时圈分析
+      </button>
+      <button
+        type="button"
+        class="result-tab"
+        role="tab"
+        :aria-selected="ui.rightTab === 'site'"
+        :class="{ 'result-tab--active': ui.rightTab === 'site' }"
+        @click="setRightTab('site')"
+      >
+        智能选址
+      </button>
+    </div>
 
-    <section class="result-section">
-      <header class="result-section__header">
-        <h3 v-if="activeGroupStat">
-          圈内 POI · {{ activeGroupStat.label }}（{{ activeGroupStat.count }} 条）
-        </h3>
-        <h3 v-else>圈内 POI</h3>
-        <span v-if="!activeGroupStat" class="result-section__meta">
-          {{ `${activeIsoPois.length} 条` }}
-        </span>
-      </header>
-      <p v-if="!analysis.isochrone" class="helper-text">请先生成等时圈查看结果。</p>
-      <p v-else-if="!activeGroupStat" class="helper-text">当前筛选无结果。</p>
-      <p v-else-if="!activeIsoPois.length" class="helper-text">该分类圈内暂无 POI。</p>
-      <template v-else>
-        <ul class="poi-list" aria-label="圈内 POI 列表">
-          <li v-for="poi in activeIsoPoisPaged" :key="poi.id" class="poi-list__item">
-            <div class="poi-list__info">
-              <strong>{{ poi.name }}</strong>
-              <span class="poi-list__meta">{{ formatTypeGroup(poi.type_group) }}</span>
-            </div>
-            <button type="button" class="button button--link" @click="navigateToPoi(poi)">
-              路径
-            </button>
-          </li>
-        </ul>
-        <button
-          v-if="canLoadMore"
-          type="button"
-          class="button button--ghost"
-          @click="loadMorePois"
-        >
-          查看更多
-        </button>
-      </template>
-    </section>
-
-    <section class="result-section">
+    <section v-show="ui.rightTab === 'iso'" class="result-section" aria-label="路线规划">
       <header class="result-section__header">
         <h3>路线规划</h3>
         <button
@@ -70,13 +35,15 @@
           清除路线
         </button>
       </header>
-      <p v-if="!route.active" class="helper-text">点击 POI 查看路线详情。</p>
+      <p v-if="!route.active && !route.loading" class="helper-text">点击 POI 查看路线详情。</p>
       <p v-else-if="route.loading" class="helper-text">正在规划路线...</p>
       <template v-else>
         <p v-if="route.summary" class="route-summary">
-          距离：{{ formatDistance(route.summary.distance) }}，
-          用时：{{ formatDuration(route.summary.duration) }}
+          距离：{{ formatDistance(route.summary.distance) }}；
+          用时：{{ formatDuration(route.summary.duration) }}；
+          方式：{{ formatProfile(route.profile) }}
         </p>
+        <p v-else class="route-summary">方式：{{ formatProfile(route.profile) }}</p>
         <p v-if="route.isFallback" class="helper-text helper-text--warn">
           当前为直线近似（ORS 不可用）
         </p>
@@ -101,31 +68,143 @@
         </div>
       </template>
     </section>
-
-    <section class="result-section">
+    <section v-show="ui.rightTab === 'site'" class="result-section" aria-label="候选点 Top10">
       <header class="result-section__header">
-        <h3>候选点 Top 3</h3>
-        <span class="result-section__meta">{{ topCandidates.length }} 项</span>
+        <h3>候选点 Top10</h3>
+        <span class="result-section__meta">{{ siteEngine.results.length }} 项</span>
       </header>
-      <ul class="candidate-list" aria-label="候选评分列表">
-        <li v-for="candidate in topCandidates" :key="candidate.id" class="candidate-card">
-          <div class="candidate-card__header">
-            <strong>{{ candidate.name }}</strong>
-            <span class="candidate-card__score">{{ candidate.score ?? '?' }}</span>
+      <div class="result-actions">
+        <button
+          type="button"
+          class="button button--ghost"
+          :disabled="ui.bboxPickArmed"
+          @click="reselectBbox"
+        >
+          重新框选
+        </button>
+        <button
+          type="button"
+          class="button button--ghost"
+          :disabled="!siteEngine.bbox || siteEngine.running"
+          @click="rerunSiteSelection"
+        >
+          重新计算
+        </button>
+        <button type="button" class="button button--ghost" @click="clearSiteSelection">
+          清除选址结果
+        </button>
+        <button
+          type="button"
+          class="button button--ghost"
+          :disabled="!siteEngine.results.length"
+          @click="exportSiteResults"
+        >
+          导出候选评分（CSV）
+        </button>
+      </div>
+      <p v-if="!siteEngine.bbox" class="helper-text">请先框选范围后开始选址。</p>
+      <p v-else-if="siteEngine.running" class="helper-text">正在计算候选点...</p>
+      <p v-else-if="!siteEngine.results.length" class="helper-text">
+        暂无候选点，请点击“开始选址/重新计算”。
+      </p>
+      <ul v-else class="site-result-list" aria-label="候选点 Top10 列表">
+        <li
+          v-for="item in siteEngine.results"
+          :key="item.rank"
+          class="site-result-item"
+          :class="{ 'site-result-item--active': item.rank === siteEngine.selectedRank }"
+        >
+          <div class="site-result-item__main" @click="selectSite(item.rank)">
+            <span class="site-result-item__rank">{{ item.rank }}</span>
+            <div class="site-result-item__body">
+              <strong>{{ item.address ?? '解析中…' }}</strong>
+              <span class="site-result-item__meta">
+                {{ formatScore(item.total) }} 分· {{ formatLngLat(item.lng, item.lat) }}
+              </span>
+            </div>
+            <button
+              type="button"
+              class="button button--ghost site-result-item__toggle"
+              :aria-expanded="Boolean(siteEngine.expandedRanks[item.rank])"
+              @click.stop="toggleSiteExplain(item.rank)"
+            >
+              {{ siteEngine.expandedRanks[item.rank] ? '收起解释' : '展开解释' }}
+            </button>
           </div>
-          <div class="candidate-card__body">
-            <span class="candidate-card__category">{{ formatTypeGroup(candidate.type_group) }}</span>
-            <div class="candidate-card__chart-placeholder" role="img" aria-label="雷达图占位">
-              雷达图占位
+          <div v-if="siteEngine.expandedRanks[item.rank]" class="site-explain">
+            <div class="site-explain__header">
+              <strong>分项解释</strong>
+              <span class="site-explain__score">总分 {{ formatScore(item.total) }}</span>
+            </div>
+            <div v-for="key in metricKeys" :key="key" class="metric-row">
+              <span class="metric-label">{{ metricLabels[key] }}</span>
+              <div class="metric-bar">
+                <span class="metric-bar__fill" :style="{ width: `${metricValue(item, key)}%` }" />
+              </div>
+              <span class="metric-value">{{ metricValue(item, key).toFixed(0) }}%</span>
             </div>
           </div>
-          <footer class="candidate-card__footer">
-            <button type="button" class="button button--ghost" @click="navigateToPoi(candidate)">
-              查看
-            </button>
-          </footer>
         </li>
       </ul>
+    </section>
+    <section v-show="ui.rightTab === 'iso'" class="result-section">
+      <header class="result-section__header">
+        <h3>等时圈统计</h3>
+        <span v-if="analysis.isochrone" class="badge">已生成</span>
+        <span v-else class="badge badge--muted">未生成</span>
+      </header>
+      <div v-if="isoGroupStatsSorted.length" class="stat-tabs">
+        <button
+          v-for="item in isoGroupStatsSorted"
+          :key="item.id"
+          type="button"
+          class="stat-tab"
+          :class="{ 'stat-tab--active': item.id === ui.activeIsoGroupId }"
+          :style="{ '--chip-color': item.color }"
+          @click="setActiveIsoGroup(item.id)"
+        >
+          <span class="stat-tab__dot" :style="{ backgroundColor: item.color }" />
+          <span class="stat-tab__label">{{ item.label }}</span>
+          <span class="stat-tab__value">{{ item.count }} 条</span>
+        </button>
+      </div>
+      <p v-else-if="analysis.isochrone" class="helper-text">
+        未选择任何分类，暂无统计结果。
+      </p>
+      <p v-else class="helper-text">请先生成等时圈查看统计。</p>
+    </section>
+
+    <section v-show="ui.rightTab === 'iso'" class="result-section">
+      <header class="result-section__header">
+        <h3>
+          圈内 POI · {{ activeGroupStat?.label ?? '未选择分类' }}（{{ activeGroupStat?.count ?? 0 }} 条）
+        </h3>
+      </header>
+      <p v-if="!analysis.isochrone" class="helper-text">请先生成等时圈查看结果。</p>
+      <p v-else-if="!isoGroupStatsSorted.length" class="helper-text">未选择任何分类，暂无结果。</p>
+      <p v-else-if="!activeGroupStat" class="helper-text">当前筛选无结果。</p>
+      <p v-else-if="!activeIsoPois.length" class="helper-text">该分类圈内暂无 POI。</p>
+      <template v-else>
+        <ul class="poi-list" aria-label="圈内 POI 列表">
+          <li v-for="poi in activeIsoPoisPaged" :key="poi.id" class="poi-list__item">
+            <div class="poi-list__info">
+              <strong>{{ poi.name }}</strong>
+              <span class="poi-list__meta">{{ formatTypeGroup(poi.type_group) }}</span>
+            </div>
+            <button type="button" class="button button--link" @click="navigateToPoi(poi)">
+              路径
+            </button>
+          </li>
+        </ul>
+        <button
+          v-if="canLoadMore"
+          type="button"
+          class="button button--ghost"
+          @click="loadMorePois"
+        >
+          查看更多
+        </button>
+      </template>
     </section>
   </aside>
 </template>
@@ -141,7 +220,7 @@ const emit = defineEmits<{
 }>();
 
 const store = useAppStore();
-const { analysis, topCandidates, route, ui, isoGroupStatsSorted, activeIsoPois, activeIsoPoisPaged } =
+const { analysis, route, ui, isoGroupStatsSorted, activeIsoPois, activeIsoPoisPaged, siteEngine } =
   storeToRefs(store);
 
 const stepsExpanded = ref(false);
@@ -157,6 +236,15 @@ const visibleSteps = computed(() => {
     ? route.value.steps
     : route.value.steps.slice(0, stepsPreviewCount);
 });
+
+const metricKeys = ['demand', 'access', 'competition', 'synergy', 'center'] as const;
+const metricLabels: Record<(typeof metricKeys)[number], string> = {
+  demand: '需求',
+  access: '可达性',
+  competition: '竞争压力',
+  synergy: '协同',
+  center: '中心性'
+};
 
 watch(
   () => route.value.active,
@@ -193,6 +281,15 @@ function formatTypeGroup(typeGroup: string) {
   return mapping[typeGroup] ?? typeGroup;
 }
 
+function formatProfile(profile: string) {
+  const mapping: Record<string, string> = {
+    'foot-walking': '步行',
+    'cycling-regular': '骑行',
+    'driving-car': '驾车'
+  };
+  return mapping[profile] ?? profile;
+}
+
 function loadMorePois() {
   store.loadMoreIsoPois();
 }
@@ -201,12 +298,62 @@ function setActiveIsoGroup(id: string) {
   store.setActiveIsoGroup(id);
 }
 
+function setRightTab(tab: 'iso' | 'site') {
+  store.setRightTab(tab);
+}
+
 function navigateToPoi(poi: POI) {
   emit('navigate', poi);
 }
 
 function clearRoute() {
   store.clearRoute();
+}
+
+function selectSite(rank: number) {
+  store.selectSiteResult(rank);
+}
+
+function toggleSiteExplain(rank: number) {
+  store.toggleSiteExplain(rank);
+}
+
+function reselectBbox() {
+  store.armBboxPick();
+}
+
+function rerunSiteSelection() {
+  store.runSiteSelectionTopN();
+}
+
+function clearSiteSelection() {
+  store.clearSiteSelection();
+}
+
+function exportSiteResults() {
+  store.exportSiteResultsCsv();
+}
+
+function metricValue(
+  site: { metrics: Record<string, number> },
+  key: (typeof metricKeys)[number]
+) {
+  const value = Number(site.metrics?.[key] ?? 0);
+  return Math.min(100, Math.max(0, value * 100));
+}
+
+function formatScore(total: number) {
+  if (!Number.isFinite(total)) {
+    return 0;
+  }
+  return Math.round(total * 100);
+}
+
+function formatLngLat(lng: number, lat: number) {
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+    return '-';
+  }
+  return `${lng.toFixed(5)},${lat.toFixed(5)}`;
 }
 
 function formatDistance(distance: number) {
@@ -243,6 +390,28 @@ function formatDuration(duration: number) {
   border-left: 1px solid #dee2e6;
   background: #ffffff;
   overflow-y: auto;
+}
+
+.result-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.result-tab {
+  border: 1px solid #dee2e6;
+  border-radius: 0.6rem;
+  background: #f8f9fa;
+  padding: 0.55rem 0.75rem;
+  font-weight: 600;
+  color: #495057;
+  cursor: pointer;
+}
+
+.result-tab--active {
+  border-color: #4c6ef5;
+  background: #edf2ff;
+  color: #364fc7;
 }
 
 .result-section {
@@ -299,7 +468,7 @@ function formatDuration(duration: number) {
 .stat-tab {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.45rem;
   padding: 0.35rem 0.7rem;
   border-radius: 999px;
   border: 1px solid #e9ecef;
@@ -308,6 +477,14 @@ function formatDuration(duration: number) {
   font-size: 0.85rem;
   cursor: pointer;
   font-family: inherit;
+}
+
+.stat-tab__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--chip-color, #364fc7);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.04);
 }
 
 .stat-tab__label {
@@ -327,7 +504,7 @@ function formatDuration(duration: number) {
 }
 
 .poi-list,
-.candidate-list {
+.site-result-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -355,45 +532,118 @@ function formatDuration(duration: number) {
   font-size: 0.85rem;
 }
 
-.candidate-card {
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.site-result-item {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  border: 1px solid #e9ecef;
-  border-radius: 0.75rem;
+  gap: 0.6rem;
   padding: 0.75rem;
+  border-radius: 0.6rem;
+  border: 1px solid #e9ecef;
   background: #f8f9fa;
 }
 
-.candidate-card__header {
-  display: flex;
-  justify-content: space-between;
+.site-result-item__main {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  gap: 0.6rem;
   align-items: center;
+  cursor: pointer;
 }
 
-.candidate-card__score {
-  font-weight: 700;
-  color: #f08c00;
+.site-result-item--active {
+  border-color: #339af0;
+  background: #e7f5ff;
 }
 
-.candidate-card__category {
+.site-result-item__rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #364fc7;
+  color: #ffffff;
   font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.site-result-item__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.site-result-item__meta {
+  font-size: 0.8rem;
   color: #868e96;
 }
 
-.candidate-card__chart-placeholder {
-  margin-top: 0.5rem;
-  border: 1px dashed #ced4da;
-  border-radius: 0.75rem;
-  padding: 1.5rem;
-  text-align: center;
-  font-size: 0.85rem;
-  color: #adb5bd;
+.site-result-item__toggle {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.75rem;
 }
 
-.candidate-card__footer {
+.site-explain {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-left: 1.6rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.6rem;
+  background: #f1f3f5;
+  border: 1px solid #e9ecef;
+}
+
+.site-explain__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: #495057;
+}
+
+.site-explain__score {
+  font-weight: 600;
+  color: #364fc7;
+}
+
+.metric-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 40px;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #495057;
+}
+
+.metric-label {
+  font-weight: 600;
+}
+
+.metric-bar {
+  position: relative;
+  height: 8px;
+  background: #e9ecef;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.metric-bar__fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #4dabf7, #339af0);
+}
+
+.metric-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .button {

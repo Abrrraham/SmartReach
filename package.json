@@ -10,7 +10,8 @@
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest --watch",
     "check": "npm run build && npm run test",
-    "type:report": "node scripts/type_report.mjs"
+    "type:report": "node scripts/type_report.mjs",
+    "lint:text": "node scripts/check-text-garbled.mjs"
   },
   "dependencies": {
     "@maplibre/maplibre-gl-geocoder": "^1.4.0",

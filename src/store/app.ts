@@ -1,5 +1,6 @@
 import { computed, ref, watch, watchEffect } from 'vue';
 import { defineStore } from 'pinia';
+import { saveAs } from 'file-saver';
 import type { Feature, FeatureCollection, Point, Polygon, MultiPolygon } from 'geojson';
 import type { POI } from '../types/poi';
 import {
@@ -64,8 +65,14 @@ interface DataState {
 
 interface UiState {
   activeIsoGroupId: string | null;
-  listPageSize: number;
-  listPage: number;
+  isoListPageSize: number;
+  isoListPage: number;
+  isoPickArmed: boolean;
+  bboxPickArmed: boolean;
+  mapHint: string | null;
+  overlay: OverlayState | null;
+  rightTab: 'iso' | 'site';
+  rightTabLocked: boolean;
 }
 
 interface PoiEngineState {
@@ -93,6 +100,41 @@ interface AnalysisState {
   sitingWeights: SitingWeights;
 }
 
+interface SiteSelectionResult {
+  rank: number;
+  lng: number;
+  lat: number;
+  total: number;
+  metrics: {
+    demand: number;
+    access: number;
+    competition: number;
+    synergy: number;
+    center: number;
+  };
+  address?: string;
+  debug?: Record<string, number>;
+}
+
+interface SiteEngineState {
+  targetGroupId: string | null;
+  bbox: [number, number, number, number] | null;
+  bboxStats: {
+    areaKm2: number;
+    widthKm: number;
+    heightKm: number;
+    poiTotal: number;
+    byGroup?: Record<string, number>;
+  } | null;
+  constraints: { maxAreaKm2: number; maxPoi: number };
+  running: boolean;
+  lastRunId: number;
+  error?: string;
+  results: SiteSelectionResult[];
+  expandedRanks: Record<number, boolean>;
+  selectedRank: number | null;
+}
+
 interface RouteState {
   active: boolean;
   loading: boolean;
@@ -104,6 +146,14 @@ interface RouteState {
   summary?: { distance: number; duration: number };
   steps?: Array<{ instruction: string; distance: number; duration: number }>;
   error?: string;
+}
+
+type OverlayType = 'loading' | 'error' | 'info';
+
+interface OverlayState {
+  type: OverlayType;
+  message: string;
+  detail?: string;
 }
 
 const POI_URL = (import.meta.env.VITE_POI_URL as string | undefined) ?? '/data/nanjing_poi.json';
@@ -119,6 +169,7 @@ const POI_COORD_SYS: CoordSys = normalizeCoordSys(
   import.meta.env.VITE_POI_COORD_SYS as string | undefined,
   'WGS84'
 );
+const AMAP_KEY = (import.meta.env.VITE_AMAP_KEY as string | undefined) ?? '';
 
 const DEFAULT_CENTER = (() => {
   const raw = (import.meta.env.VITE_DEFAULT_CENTER as string | undefined) ?? '118.796,32.060';
@@ -181,8 +232,14 @@ export const useAppStore = defineStore('app', () => {
 
   const ui = ref<UiState>({
     activeIsoGroupId: null,
-    listPageSize: 200,
-    listPage: 1
+    isoListPageSize: 200,
+    isoListPage: 1,
+    isoPickArmed: false,
+    bboxPickArmed: false,
+    mapHint: null,
+    overlay: null,
+    rightTab: 'iso',
+    rightTabLocked: false
   });
 
   const poiEngine = ref<PoiEngineState>({
@@ -208,6 +265,20 @@ export const useAppStore = defineStore('app', () => {
   const analysis = ref<AnalysisState>({
     isochrone: undefined,
     sitingWeights: { ...INITIAL_WEIGHTS }
+  });
+
+
+  const siteEngine = ref<SiteEngineState>({
+    targetGroupId: null,
+    bbox: null,
+    bboxStats: null,
+    constraints: { maxAreaKm2: 200, maxPoi: 80000 },
+    running: false,
+    lastRunId: 0,
+    error: undefined,
+    results: [],
+    expandedRanks: {},
+    selectedRank: null
   });
 
   const route = ref<RouteState>({
@@ -269,8 +340,8 @@ export const useAppStore = defineStore('app', () => {
     return isoPoisByGroup.value[groupId] ?? [];
   });
   const activeIsoPoisPaged = computed(() => {
-    const size = Math.max(1, ui.value.listPageSize);
-    return activeIsoPois.value.slice(0, ui.value.listPage * size);
+    const size = Math.max(1, ui.value.isoListPageSize);
+    return activeIsoPois.value.slice(0, ui.value.isoListPage * size);
   });
 
   const topCandidates = computed(() => {
@@ -303,9 +374,57 @@ export const useAppStore = defineStore('app', () => {
   ];
   const toPlainGroups = (groups: string[]): string[] =>
     Array.from(groups ?? []).map((group) => String(group));
+  const degreesToRadians = (value: number) => (value * Math.PI) / 180;
+  const haversineKm = (a: [number, number], b: [number, number]) => {
+    const [lng1, lat1] = a;
+    const [lng2, lat2] = b;
+    const radLat1 = degreesToRadians(lat1);
+    const radLat2 = degreesToRadians(lat2);
+    const deltaLat = radLat2 - radLat1;
+    const deltaLng = degreesToRadians(lng2 - lng1);
+    const sinLat = Math.sin(deltaLat / 2);
+    const sinLng = Math.sin(deltaLng / 2);
+    const h =
+      sinLat * sinLat +
+      Math.cos(radLat1) * Math.cos(radLat2) * sinLng * sinLng;
+    return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(h)));
+  };
+  const calcBboxMetrics = (bbox: [number, number, number, number]) => {
+    const [minLng, minLat, maxLng, maxLat] = bbox;
+    const centerLat = (minLat + maxLat) / 2;
+    const centerLng = (minLng + maxLng) / 2;
+    const widthKm = haversineKm([minLng, centerLat], [maxLng, centerLat]);
+    const heightKm = haversineKm([centerLng, minLat], [centerLng, maxLat]);
+    return {
+      widthKm,
+      heightKm,
+      areaKm2: Math.max(0, widthKm * heightKm)
+    };
+  };
+  const escapeCsv = (value: unknown): string => {
+    const text = value === null || value === undefined ? '' : String(value);
+    if (/[",\n]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+  };
+  const formatCsvNumber = (value: number, digits: number) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(digits) : '';
+  };
+  const formatDateStamp = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}${month}${day}`;
+  };
+  const sanitizeFileName = (value: string) => value.replace(/[\\/:*?"<>|]/g, '-');
   let poiWorker: Worker | null = null;
   let lastRequestId = 0;
   let expandRequestId = 0;
+  let bboxStatsRequestId = 0;
+  let siteSelectRequestId = 0;
+  let geocodeRequestId = 0;
   const pendingExpand = new Map<number, (zoom: number | null) => void>();
   const isoIndexedGroups = new Set<string>();
 
@@ -394,9 +513,324 @@ export const useAppStore = defineStore('app', () => {
     );
   }
 
+  function showLoading(message: string, detail?: string) {
+    ui.value.overlay = { type: 'loading', message, detail };
+  }
+
+  function showError(message: string, detail?: string) {
+    ui.value.overlay = { type: 'error', message, detail };
+  }
+
+  function showInfo(message: string) {
+    ui.value.overlay = { type: 'info', message };
+  }
+
+  function hideOverlay() {
+    ui.value.overlay = null;
+  }
+
+  function armIsoPick() {
+    cancelBboxPick();
+    ui.value.isoPickArmed = true;
+    ui.value.mapHint = '请点击任意位置生成等时圈';
+  }
+
+  function cancelIsoPick() {
+    ui.value.isoPickArmed = false;
+    if (!ui.value.bboxPickArmed) {
+      ui.value.mapHint = null;
+    }
+  }
+
+  function armBboxPick() {
+    cancelIsoPick();
+    ui.value.bboxPickArmed = true;
+    ui.value.mapHint = '拖拽框选分析范围（ESC/取消 退出）';
+  }
+
+  function cancelBboxPick() {
+    ui.value.bboxPickArmed = false;
+    if (!ui.value.isoPickArmed) {
+      ui.value.mapHint = null;
+    }
+  }
+
+  type RightTab = UiState['rightTab'];
+
+  const rightTabHasContent = (tab: RightTab) => {
+    if (tab === 'iso') {
+      return Boolean(analysis.value.isochrone || route.value.active || route.value.loading);
+    }
+    return Boolean(
+      siteEngine.value.results.length ||
+        siteEngine.value.bbox ||
+        siteEngine.value.running
+    );
+  };
+
+  function setRightTab(tab: RightTab) {
+    ui.value.rightTab = tab;
+    ui.value.rightTabLocked = true;
+  }
+
+  function autoSwitchRightTab(tab: RightTab) {
+    const current = ui.value.rightTab;
+    if (ui.value.rightTabLocked && rightTabHasContent(current)) {
+      return;
+    }
+    ui.value.rightTab = tab;
+    ui.value.rightTabLocked = false;
+  }
+
+  function setSiteTargetGroup(id: string | null) {
+    siteEngine.value.targetGroupId = id;
+    siteEngine.value.results = [];
+    siteEngine.value.expandedRanks = {};
+    siteEngine.value.selectedRank = null;
+    siteEngine.value.error = undefined;
+  }
+
+  function setSiteBbox(bbox: [number, number, number, number]) {
+    siteEngine.value.bbox = toPlainBbox(bbox);
+    siteEngine.value.bboxStats = null;
+    siteEngine.value.results = [];
+    siteEngine.value.expandedRanks = {};
+    siteEngine.value.selectedRank = null;
+    siteEngine.value.error = undefined;
+    requestBboxStats(siteEngine.value.bbox);
+  }
+
+  function requestBboxStats(bbox: [number, number, number, number]) {
+    if (!poiWorker || !poiEngine.value.ready) {
+      siteEngine.value.bboxStats = null;
+      return;
+    }
+    siteEngine.value.error = undefined;
+    showLoading('正在统计范围内 POI...');
+    bboxStatsRequestId += 1;
+    const requestId = bboxStatsRequestId;
+    try {
+      poiWorker.postMessage({
+        type: 'BBOX_STATS',
+        payload: {
+          bbox: toPlainBbox(bbox),
+          requestId
+        }
+      });
+    } catch (error) {
+      siteEngine.value.error = error instanceof Error ? error.message : '范围统计失败';
+      showError('选址错误', siteEngine.value.error);
+    }
+  }
+
+
+  function selectSiteResult(rank: number | null) {
+    siteEngine.value.selectedRank = rank;
+  }
+
+  function toggleSiteExplain(rank: number) {
+    const expanded = siteEngine.value.expandedRanks[rank];
+    siteEngine.value.expandedRanks = {
+      ...siteEngine.value.expandedRanks,
+      [rank]: !expanded
+    };
+  }
+
+  function updateSiteResultAddress(rank: number, address: string) {
+    const index = siteEngine.value.results.findIndex((item) => item.rank === rank);
+    if (index < 0) {
+      return;
+    }
+    siteEngine.value.results[index] = {
+      ...siteEngine.value.results[index],
+      address
+    };
+  }
+
+  async function reverseGeocodeTop10() {
+    const key = AMAP_KEY.trim();
+    if (!siteEngine.value.results.length) {
+      return;
+    }
+    if (!key) {
+      siteEngine.value.results.forEach((item) => {
+        updateSiteResultAddress(item.rank, `${item.lng.toFixed(5)},${item.lat.toFixed(5)}`);
+      });
+      return;
+    }
+    geocodeRequestId += 1;
+    const requestId = geocodeRequestId;
+    const queue = siteEngine.value.results.map((item) => ({
+      rank: item.rank,
+      lng: item.lng,
+      lat: item.lat
+    }));
+    let cursor = 0;
+    const concurrency = 2;
+    const fetchAddress = async (entry: { rank: number; lng: number; lat: number }) => {
+      const [lng, lat] =
+        MAP_COORD_SYS === 'GCJ02'
+          ? [entry.lng, entry.lat]
+          : convertCoord([entry.lng, entry.lat], MAP_COORD_SYS, 'GCJ02');
+      const url = `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(
+        key
+      )}&location=${lng},${lat}&radius=1000&extensions=base`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const data = (await response.json()) as {
+          status?: string;
+          regeocode?: { formatted_address?: string; addressComponent?: { streetNumber?: { location?: string } } };
+        };
+        const address =
+          data.regeocode?.formatted_address ||
+          data.regeocode?.addressComponent?.streetNumber?.location;
+        return typeof address === 'string' && address.trim().length > 0
+          ? address.trim()
+          : `${entry.lng.toFixed(5)},${entry.lat.toFixed(5)}`;
+      } catch (error) {
+        return `${entry.lng.toFixed(5)},${entry.lat.toFixed(5)}`;
+      }
+    };
+    const worker = async () => {
+      while (cursor < queue.length) {
+        const current = queue[cursor];
+        cursor += 1;
+        const address = await fetchAddress(current);
+        if (requestId !== geocodeRequestId) {
+          return;
+        }
+        updateSiteResultAddress(current.rank, address);
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  }
+
+  function exportSiteResultsCsv() {
+    const results = siteEngine.value.results;
+    if (!results.length) {
+      showInfo('暂无候选点结果可导出');
+      return;
+    }
+    const rows = [
+      [
+        'rank',
+        'lng',
+        'lat',
+        'address',
+        'total',
+        'demand',
+        'access',
+        'competition',
+        'synergy',
+        'center'
+      ]
+        .map(escapeCsv)
+        .join(',')
+    ];
+    results.forEach((item) => {
+      rows.push(
+        [
+          escapeCsv(item.rank),
+          escapeCsv(formatCsvNumber(item.lng, 6)),
+          escapeCsv(formatCsvNumber(item.lat, 6)),
+          escapeCsv(item.address ?? ''),
+          escapeCsv(formatCsvNumber(item.total, 4)),
+          escapeCsv(formatCsvNumber(item.metrics?.demand ?? 0, 4)),
+          escapeCsv(formatCsvNumber(item.metrics?.access ?? 0, 4)),
+          escapeCsv(formatCsvNumber(item.metrics?.competition ?? 0, 4)),
+          escapeCsv(formatCsvNumber(item.metrics?.synergy ?? 0, 4)),
+          escapeCsv(formatCsvNumber(item.metrics?.center ?? 0, 4))
+        ].join(',')
+      );
+    });
+    const csv = `\ufeff${rows.join('\n')}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const rawLabel = siteEngine.value.targetGroupId
+      ? GROUP_LABELS[siteEngine.value.targetGroupId] ?? siteEngine.value.targetGroupId
+      : '候选点';
+    const safeLabel = sanitizeFileName(rawLabel);
+    const date = formatDateStamp(new Date());
+    saveAs(blob, `${safeLabel}-Top10-${date}.csv`);
+  }
+
+  function runSiteSelectionTopN() {
+    if (siteEngine.value.running) {
+      showInfo('选址正在计算，请稍候');
+      return;
+    }
+    if (!poiWorker || !poiEngine.value.ready) {
+      siteEngine.value.error = '选址引擎未就绪，请稍后再试';
+      showError('选址错误', siteEngine.value.error);
+      return;
+    }
+    const bbox = siteEngine.value.bbox;
+    if (!bbox) {
+      showInfo('请先框选分析范围');
+      return;
+    }
+    if (!siteEngine.value.targetGroupId) {
+      showInfo('请先选择商铺类型');
+      return;
+    }
+    const stats = siteEngine.value.bboxStats;
+    if (!stats) {
+      showInfo('请先统计范围内 POI');
+      return;
+    }
+    const { maxAreaKm2, maxPoi } = siteEngine.value.constraints;
+    if (stats.areaKm2 > maxAreaKm2) {
+      showInfo(`范围过大（${maxAreaKm2} km2），请缩小范围`);
+      return;
+    }
+    if (stats.poiTotal > maxPoi) {
+      showInfo(`范围内 POI 过多（${maxPoi}），请缩小范围`);
+      return;
+    }
+    siteEngine.value.error = undefined;
+    siteEngine.value.running = true;
+    siteEngine.value.results = [];
+    siteEngine.value.expandedRanks = {};
+    siteEngine.value.selectedRank = null;
+    showLoading('正在计算候选点评分...', '范围越大耗时越长，请稍候');
+    siteSelectRequestId += 1;
+    const requestId = siteSelectRequestId;
+    siteEngine.value.lastRunId = requestId;
+    try {
+      poiWorker.postMessage({
+        type: 'SITE_SELECT',
+        payload: {
+          bbox: toPlainBbox(bbox),
+          targetGroupId: siteEngine.value.targetGroupId,
+          topN: 10,
+          requestId
+        }
+      });
+    } catch (error) {
+      siteEngine.value.running = false;
+      siteEngine.value.error = error instanceof Error ? error.message : '选址计算失败';
+      showError('选址失败', siteEngine.value.error);
+    }
+  }
+
+  function clearSiteSelection() {
+    siteEngine.value.bbox = null;
+    siteEngine.value.bboxStats = null;
+    siteEngine.value.results = [];
+    siteEngine.value.expandedRanks = {};
+    siteEngine.value.selectedRank = null;
+    siteEngine.value.running = false;
+    siteEngine.value.error = undefined;
+    siteEngine.value.lastRunId = 0;
+    geocodeRequestId += 1;
+    cancelBboxPick();
+  }
+
   function setActiveIsoGroup(id: string | null) {
     ui.value.activeIsoGroupId = id;
-    ui.value.listPage = 1;
+    ui.value.isoListPage = 1;
   }
 
   function ensureActiveIsoGroup() {
@@ -405,18 +839,18 @@ export const useAppStore = defineStore('app', () => {
       if (ui.value.activeIsoGroupId !== null) {
         ui.value.activeIsoGroupId = null;
       }
-      ui.value.listPage = 1;
+      ui.value.isoListPage = 1;
       return;
     }
     const activeId = ui.value.activeIsoGroupId;
     if (!activeId || !stats.some((item) => item.id === activeId)) {
       ui.value.activeIsoGroupId = stats[0].id;
-      ui.value.listPage = 1;
+      ui.value.isoListPage = 1;
     }
   }
 
   function loadMoreIsoPois() {
-    ui.value.listPage += 1;
+    ui.value.isoListPage += 1;
   }
 
   function initPoiEngine() {
@@ -429,6 +863,7 @@ export const useAppStore = defineStore('app', () => {
     poiEngine.value.error = undefined;
     poiEngine.value.indexReady = false;
     poiEngine.value.initialRendered = false;
+    showLoading('正在加载 POI 数据...');
 
     poiWorker = new Worker(new URL('../workers/poi.worker.ts', import.meta.url), {
       type: 'module'
@@ -454,6 +889,7 @@ export const useAppStore = defineStore('app', () => {
         poiEngine.value.indexReady = false;
         poiEngine.value.poiByGroup = {};
         poiEngine.value.hullByGroup = {};
+        hideOverlay();
         logPoi('init_done', {
           groups: Object.keys(poiEngine.value.typeCounts).length,
           total: payload.total ?? 0
@@ -464,6 +900,7 @@ export const useAppStore = defineStore('app', () => {
         poiEngine.value.buildingIndex = false;
         poiEngine.value.indexReady = true;
         poiEngine.value.queryLoading = false;
+        hideOverlay();
         logPoi('index_ready', {
           groups: payload?.groups ?? poiEngine.value.selectedGroups
         });
@@ -524,6 +961,55 @@ export const useAppStore = defineStore('app', () => {
         data.value.poisInIsochrone = [];
         return;
       }
+      if (type === 'BBOX_STATS_RESULT') {
+        if (payload.requestId !== bboxStatsRequestId) {
+          return;
+        }
+        const bbox = siteEngine.value.bbox;
+        if (bbox) {
+          const metrics = calcBboxMetrics(bbox);
+          siteEngine.value.error = undefined;
+          siteEngine.value.bboxStats = {
+            ...metrics,
+            poiTotal: Number(payload.poiTotal ?? 0),
+            byGroup: payload.byGroup ?? {}
+          };
+        } else {
+          siteEngine.value.bboxStats = null;
+        }
+        hideOverlay();
+        return;
+      }
+      if (type === 'SITE_SELECT_RESULT') {
+        if (payload.requestId !== siteSelectRequestId) {
+          return;
+        }
+        const results = Array.isArray(payload.results) ? payload.results : [];
+        siteEngine.value.running = false;
+        siteEngine.value.error = undefined;
+        siteEngine.value.results = results.map((item: any, index: number) => ({
+          rank: index + 1,
+          lng: Number(item.lng),
+          lat: Number(item.lat),
+          total: Number(item.total ?? 0),
+          metrics: {
+            demand: Number(item.metrics?.demand ?? 0),
+            access: Number(item.metrics?.access ?? 0),
+            competition: Number(item.metrics?.competition ?? 0),
+            synergy: Number(item.metrics?.synergy ?? 0),
+            center: Number(item.metrics?.center ?? 0)
+          },
+          address: item.address,
+          debug: item.debug
+        }));
+        siteEngine.value.expandedRanks = {};
+        siteEngine.value.selectedRank =
+          siteEngine.value.results.length > 0 ? siteEngine.value.results[0].rank : null;
+        hideOverlay();
+        autoSwitchRightTab('site');
+        reverseGeocodeTop10();
+        return;
+      }
       if (type === 'QUERY_RESULT') {
         if (payload.requestId !== lastRequestId) {
           return;
@@ -558,14 +1044,30 @@ export const useAppStore = defineStore('app', () => {
         return;
       }
       if (type === 'ERROR') {
+        const sourceType = String(payload?.sourceType ?? 'UNKNOWN');
+        const message = payload?.message ?? 'POI 引擎错误';
+        const stack = payload?.stack;
+        if (stack) {
+          console.error('[poi-worker] error stack', { sourceType, stack });
+        } else {
+          console.error('[poi-worker] error', { sourceType, message });
+        }
+        if (sourceType === 'SITE_SELECT' || sourceType === 'BBOX_STATS') {
+          siteEngine.value.running = false;
+          siteEngine.value.error = message;
+          showError('选址失败', siteEngine.value.error);
+          return;
+        }
         poiEngine.value.loadingPois = false;
         poiEngine.value.buildingIndex = false;
         poiEngine.value.queryLoading = false;
         poiEngine.value.indexReady = false;
+        siteEngine.value.running = false;
         pendingExpand.forEach((resolve) => resolve(null));
         pendingExpand.clear();
-        poiEngine.value.error = payload.message ?? 'POI 引擎错误';
+        poiEngine.value.error = message;
         isoEngine.value.indexing = false;
+        showError('POI 引擎错误', poiEngine.value.error);
       }
     };
 
@@ -628,6 +1130,7 @@ export const useAppStore = defineStore('app', () => {
     poiEngine.value.indexReady = false;
     if (poiWorker && poiEngine.value.ready) {
       poiEngine.value.buildingIndex = true;
+      showLoading('正在构建 POI 索引...');
       const groupsPlain = toPlainGroups(unique);
       poiWorker.postMessage({
         type: 'BUILD_INDEX',
@@ -825,6 +1328,7 @@ export const useAppStore = defineStore('app', () => {
       isochroneAbort = null;
       iso.value.loading = false;
     }
+    hideOverlay();
   }
 
   function setIsoOriginFromMapClick(lng: number, lat: number) {
@@ -918,7 +1422,7 @@ export const useAppStore = defineStore('app', () => {
     isoIndexedGroups.clear();
     data.value.poisInIsochrone = [];
     ui.value.activeIsoGroupId = null;
-    ui.value.listPage = 1;
+    ui.value.isoListPage = 1;
     if (poiWorker) {
       poiWorker.postMessage({ type: 'CLEAR_ISOCHRONE' });
     }
@@ -960,6 +1464,7 @@ export const useAppStore = defineStore('app', () => {
       : iso.value.origin;
     if (!nextOrigin) {
       iso.value.error = '请先在地图上点击起点。';
+      showInfo('请先在地图上点击起点。');
       return;
     }
 
@@ -974,6 +1479,7 @@ export const useAppStore = defineStore('app', () => {
     if (!rangesSec.length) {
       iso.value.loading = false;
       iso.value.error = '请至少选择一个时间阈值。';
+      showInfo('请至少选择一个时间阈值。');
       return;
     }
 
@@ -981,12 +1487,14 @@ export const useAppStore = defineStore('app', () => {
     if (!ranges.length) {
       iso.value.loading = false;
       iso.value.error = notice ?? '等时圈时间超出 ORS 限制，请调整。';
+      showInfo(iso.value.error);
       return;
     }
     iso.value.rangesMin = ranges.map((value) => Math.round(value / 60));
     if (notice) {
       iso.value.error = notice;
     }
+    showLoading('正在生成等时圈...');
 
     const [lonWgs, latWgs] = gcj02ToWgs84(nextOrigin.lng, nextOrigin.lat);
     const cacheKey = `${filters.value.travelMode}|time|${ranges.join(',')}|${lonWgs.toFixed(
@@ -1002,6 +1510,8 @@ export const useAppStore = defineStore('app', () => {
       analysis.value.isochrone = cached.geojson;
       applyIsochroneFilter();
       activateIsoEngine(cached.geojson, nextOrigin);
+      hideOverlay();
+      autoSwitchRightTab('iso');
       return;
     }
 
@@ -1039,6 +1549,8 @@ export const useAppStore = defineStore('app', () => {
         isFallback: result.isFallback,
         error: iso.value.error
       });
+      hideOverlay();
+      autoSwitchRightTab('iso');
     } catch (error) {
       if (controller.signal.aborted) {
         return;
@@ -1048,6 +1560,7 @@ export const useAppStore = defineStore('app', () => {
       }
       iso.value.loading = false;
       iso.value.error = '等时圈生成失败，请稍后重试。';
+      showError('等时圈生成失败', iso.value.error);
     }
   }
 
@@ -1116,6 +1629,7 @@ export const useAppStore = defineStore('app', () => {
         loading: false,
         error: '请先在地图上选择起点。'
       };
+      showInfo('请先在地图上选择起点。');
       return;
     }
     const profile = filters.value.travelMode;
@@ -1127,8 +1641,9 @@ export const useAppStore = defineStore('app', () => {
         ...route.value,
         active: false,
         loading: false,
-        error: 'è·¯çº¿ç»“æžœæ— æ•ˆï¼Œè¯·é‡è¯•ã€?'
+        error: '路线结果无效，请重试。'
       };
+      showError('路线规划失败', '路线结果无效，请重试。');
       return;
     }
     const end = { lng: endLng, lat: endLat };
@@ -1145,6 +1660,7 @@ export const useAppStore = defineStore('app', () => {
       steps: undefined,
       error: undefined
     };
+    showLoading('正在规划路线...');
 
     const [startLngW, startLatW] = toWgs84([start.lng, start.lat]);
     const [endLngW, endLatW] = toWgs84([end.lng, end.lat]);
@@ -1167,6 +1683,7 @@ export const useAppStore = defineStore('app', () => {
         steps: cached.steps,
         error: cached.isFallback ? '当前为直线近似（ORS 不可用）' : undefined
       };
+      hideOverlay();
       return;
     }
 
@@ -1204,6 +1721,11 @@ export const useAppStore = defineStore('app', () => {
         steps: result.steps,
         error: result.isFallback ? resolveRouteError(result.error, result.status) : undefined
       };
+      if (route.value.error) {
+        showInfo(route.value.error);
+      } else {
+        hideOverlay();
+      }
       if (!result.isFallback) {
         routeCache.set(cacheKey, {
           ts: Date.now(),
@@ -1253,6 +1775,7 @@ export const useAppStore = defineStore('app', () => {
         geojson: fallbackGeojson,
         error: '当前为直线近似（ORS 不可用）'
       };
+      showError('路线规划失败', route.value.error);
     }
   }
 
@@ -1328,6 +1851,7 @@ export const useAppStore = defineStore('app', () => {
     route,
     poiEngine,
     analysis,
+    siteEngine,
     nanjingBounds,
     visiblePoisInIsochrone,
     isoGroupStatsSorted,
@@ -1336,6 +1860,22 @@ export const useAppStore = defineStore('app', () => {
     activeIsoPoisPaged,
     topCandidates,
     initPoiEngine,
+    showLoading,
+    showError,
+    showInfo,
+    hideOverlay,
+    armIsoPick,
+    cancelIsoPick,
+    armBboxPick,
+    cancelBboxPick,
+    setRightTab,
+    setSiteTargetGroup,
+    setSiteBbox,
+    runSiteSelectionTopN,
+    exportSiteResultsCsv,
+    clearSiteSelection,
+    selectSiteResult,
+    toggleSiteExplain,
     setMapReady,
     updateViewport,
     setSelectedGroups,

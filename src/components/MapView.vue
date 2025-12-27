@@ -1,6 +1,7 @@
 <template>
   <div class="map-view">
     <div ref="mapContainer" class="map-canvas" aria-label="主地图" />
+    <MapHintBar v-if="ui.mapHint" :hint="ui.mapHint" @cancel="handleMapHintCancel" />
   </div>
 </template>
 
@@ -23,6 +24,7 @@ import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
 import { buildAmapRasterStyle } from '../services/style';
 import { GROUP_COLORS } from '../utils/poiGroups';
+import MapHintBar from './MapHintBar.vue';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import '@maplibre/maplibre-gl-geocoder/dist/maplibre-gl-geocoder.css';
 
@@ -69,11 +71,17 @@ const OSM_STYLE: maplibregl.StyleSpecification = {
   ]
 };
 const AMAP_STYLE: maplibregl.StyleSpecification = buildAmapRasterStyle();
-
 const ISOCHRONE_SOURCE_ID = 'isochrones';
 const ISO_ORIGIN_SOURCE_ID = 'iso-origin';
 const ROUTE_SOURCE_ID = 'route';
 const ROUTE_ENDPOINT_SOURCE_ID = 'route-endpoint';
+const SITE_BBOX_SOURCE_ID = 'site-bbox';
+const SITE_BBOX_FILL_ID = 'site-bbox-fill';
+const SITE_BBOX_LINE_ID = 'site-bbox-line';
+const SITE_RESULT_SOURCE_ID = 'site-results';
+const SITE_RESULT_POINT_ID = 'site-result-point';
+const SITE_RESULT_LABEL_ID = 'site-result-label';
+const SITE_RESULT_HIGHLIGHT_ID = 'site-result-highlight';
 const POINT_SOURCE_PREFIX = 'poi';
 const HULL_SOURCE_PREFIX = 'hull';
 const CLUSTER_RADIUS_MIN = 12;
@@ -124,11 +132,17 @@ const emit = defineEmits<{
 const mapContainer = ref<HTMLDivElement | null>(null);
 const mapInstance = ref<MaplibreMap>();
 const store = useAppStore();
-const { map, nanjingBounds, analysis, poiEngine, isoEngine, route } = storeToRefs(store);
+const { map, nanjingBounds, analysis, poiEngine, isoEngine, route, ui, siteEngine } =
+  storeToRefs(store);
 const viewportDebounceMs = 120;
 let viewportTimer: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let resizeRaf = 0;
+let bboxDragStart: { x: number; y: number } | null = null;
+let bboxDragElement: HTMLDivElement | null = null;
+let bboxDragging = false;
+let bboxDragRaf = 0;
+let bboxDragPending: { x: number; y: number } | null = null;
 
 function scheduleViewportQuery() {
   if (viewportTimer) {
@@ -177,6 +191,77 @@ function scheduleMapResize() {
   });
 }
 
+function updateMapCursor() {
+  const map = mapInstance.value;
+  if (!map) return;
+  map.getCanvas().style.cursor =
+    ui.value.isoPickArmed || ui.value.bboxPickArmed ? 'crosshair' : '';
+}
+
+function handleIsoPick(coordinates: [number, number]) {
+  store.setIsoOriginFromMapClick(coordinates[0], coordinates[1]);
+  store.generateIsochrones(coordinates);
+  store.cancelIsoPick();
+}
+
+function handleMapHintCancel() {
+  if (ui.value.bboxPickArmed) {
+    store.cancelBboxPick();
+    clearBboxDrag();
+    return;
+  }
+  if (ui.value.isoPickArmed) {
+    store.cancelIsoPick();
+  }
+}
+
+function attachGeocoderSearchButton(
+  geocoder: MaplibreGeocoder,
+  map: MaplibreMap
+) {
+  const container = map.getContainer().querySelector(
+    '.maplibregl-ctrl-geocoder'
+  ) as HTMLElement | null;
+  if (!container) return;
+  if (container.querySelector('.map-geocoder-search-button')) return;
+  const input = container.querySelector(
+    '.maplibregl-ctrl-geocoder--input'
+  ) as HTMLInputElement | null;
+  const actions = container.querySelector(
+    '.maplibregl-ctrl-geocoder--pin-right'
+  ) as HTMLElement | null;
+  if (!input || !actions) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'map-geocoder-search-button';
+  button.textContent = '搜索';
+  button.setAttribute('aria-label', '搜索');
+  button.addEventListener('click', () => {
+    const query = input.value.trim();
+    if (!query) {
+      store.showInfo('请输入搜索内容，例如：新街口、南京站…');
+      input.focus();
+      return;
+    }
+    geocoder.query(query);
+  });
+  actions.prepend(button);
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    if (ui.value.bboxPickArmed) {
+      store.cancelBboxPick();
+      clearBboxDrag();
+      return;
+    }
+    if (ui.value.isoPickArmed) {
+      store.cancelIsoPick();
+    }
+  }
+}
+
 function attachResizeObserver(target?: HTMLElement | null) {
   if (!target) return;
   resizeObserver = new ResizeObserver(() => {
@@ -184,6 +269,112 @@ function attachResizeObserver(target?: HTMLElement | null) {
   });
   resizeObserver.observe(target);
   window.addEventListener('resize', scheduleMapResize);
+}
+
+function resolveRelativePoint(event: MouseEvent) {
+  const container = mapContainer.value;
+  if (!container) {
+    return { x: event.clientX, y: event.clientY };
+  }
+  const rect = container.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top
+  };
+}
+
+function clearBboxDrag() {
+  if (bboxDragElement?.parentNode) {
+    bboxDragElement.parentNode.removeChild(bboxDragElement);
+  }
+  bboxDragElement = null;
+  bboxDragStart = null;
+  bboxDragging = false;
+  if (bboxDragRaf) {
+    cancelAnimationFrame(bboxDragRaf);
+    bboxDragRaf = 0;
+  }
+  bboxDragPending = null;
+  if (mapInstance.value && ui.value.bboxPickArmed) {
+    mapInstance.value.dragPan.disable();
+  } else {
+    mapInstance.value?.dragPan.enable();
+  }
+}
+
+function handleBboxMouseDown(event: MouseEvent) {
+  if (!ui.value.bboxPickArmed) return;
+  event.preventDefault();
+  const point = resolveRelativePoint(event);
+  bboxDragStart = point;
+  bboxDragging = true;
+  const container = mapContainer.value;
+  if (!container) {
+    bboxDragging = false;
+    bboxDragStart = null;
+    return;
+  }
+  const rect = document.createElement('div');
+  rect.className = 'bbox-preview';
+  rect.style.left = `${point.x}px`;
+  rect.style.top = `${point.y}px`;
+  rect.style.width = '0px';
+  rect.style.height = '0px';
+  container.appendChild(rect);
+  bboxDragElement = rect;
+  mapInstance.value?.dragPan.disable();
+}
+
+function handleBboxMouseMove(event: MouseEvent) {
+  if (!ui.value.bboxPickArmed || !bboxDragging || !bboxDragStart || !bboxDragElement) {
+    return;
+  }
+  bboxDragPending = resolveRelativePoint(event);
+  if (bboxDragRaf) {
+    return;
+  }
+  bboxDragRaf = requestAnimationFrame(() => {
+    bboxDragRaf = 0;
+    if (!bboxDragPending || !bboxDragStart || !bboxDragElement) {
+      return;
+    }
+    const point = bboxDragPending;
+    bboxDragPending = null;
+    const left = Math.min(point.x, bboxDragStart.x);
+    const top = Math.min(point.y, bboxDragStart.y);
+    const width = Math.abs(point.x - bboxDragStart.x);
+    const height = Math.abs(point.y - bboxDragStart.y);
+    bboxDragElement.style.left = `${left}px`;
+    bboxDragElement.style.top = `${top}px`;
+    bboxDragElement.style.width = `${width}px`;
+    bboxDragElement.style.height = `${height}px`;
+  });
+}
+
+function handleBboxMouseUp(event: MouseEvent) {
+  if (!ui.value.bboxPickArmed || !bboxDragging || !bboxDragStart) {
+    return;
+  }
+  const point = resolveRelativePoint(event);
+  const start = { ...bboxDragStart };
+  const width = Math.abs(point.x - bboxDragStart.x);
+  const height = Math.abs(point.y - bboxDragStart.y);
+  clearBboxDrag();
+  if (width < 4 || height < 4) {
+    return;
+  }
+  const map = mapInstance.value;
+  if (!map) {
+    return;
+  }
+  const startLngLat = map.unproject([start.x, start.y]);
+  const endLngLat = map.unproject([point.x, point.y]);
+  const minLng = Math.min(startLngLat.lng, endLngLat.lng);
+  const minLat = Math.min(startLngLat.lat, endLngLat.lat);
+  const maxLng = Math.max(startLngLat.lng, endLngLat.lng);
+  const maxLat = Math.max(startLngLat.lat, endLngLat.lat);
+  store.setSiteBbox([minLng, minLat, maxLng, maxLat]);
+  store.cancelBboxPick();
 }
 
 function buildInitialStyle(): string | maplibregl.StyleSpecification {
@@ -235,6 +426,14 @@ const emptyOriginCollection: FeatureCollection<Point, Record<string, unknown>> =
   features: []
 };
 const emptyRouteCollection: FeatureCollection = {
+  type: 'FeatureCollection',
+  features: []
+};
+const emptySiteResultCollection: FeatureCollection<Point, Record<string, unknown>> = {
+  type: 'FeatureCollection',
+  features: []
+};
+const emptySiteBboxCollection: FeatureCollection<Polygon, Record<string, unknown>> = {
   type: 'FeatureCollection',
   features: []
 };
@@ -400,6 +599,9 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
   }
 
   const clusterHandler = async (event: maplibregl.MapLayerMouseEvent) => {
+    if (ui.value.isoPickArmed || ui.value.bboxPickArmed) {
+      return;
+    }
     if (!event.features?.length) return;
     const feature = event.features[0];
     if (!feature.geometry || feature.geometry.type !== 'Point') {
@@ -421,6 +623,9 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
     });
   };
   const pointHandler = (event: maplibregl.MapLayerMouseEvent) => {
+    if (ui.value.isoPickArmed || ui.value.bboxPickArmed) {
+      return;
+    }
     if (!event.features?.length) return;
     const feature = event.features[0];
     if (!feature.geometry || feature.geometry.type !== 'Point') {
@@ -649,6 +854,165 @@ function ensureRouteEndpointLayer(map: MaplibreMap) {
   }
 }
 
+function ensureSiteBboxLayers(map: MaplibreMap) {
+  if (!map.getSource(SITE_BBOX_SOURCE_ID)) {
+    map.addSource(SITE_BBOX_SOURCE_ID, {
+      type: 'geojson',
+      data: emptySiteBboxCollection
+    });
+    map.addLayer({
+      id: SITE_BBOX_FILL_ID,
+      type: 'fill',
+      source: SITE_BBOX_SOURCE_ID,
+      paint: {
+        'fill-color': '#5c7cfa',
+        'fill-opacity': 0.12
+      }
+    });
+    map.addLayer({
+      id: SITE_BBOX_LINE_ID,
+      type: 'line',
+      source: SITE_BBOX_SOURCE_ID,
+      paint: {
+        'line-color': '#364fc7',
+        'line-width': 2
+      }
+    });
+  }
+}
+
+function setSiteBbox(bbox?: [number, number, number, number] | null) {
+  const map = mapInstance.value;
+  if (!map) return;
+  ensureSiteBboxLayers(map);
+  const source = map.getSource(SITE_BBOX_SOURCE_ID) as GeoJSONSource | undefined;
+  if (!source) return;
+  if (!bbox) {
+    source.setData(emptySiteBboxCollection);
+    return;
+  }
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  source.setData({
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [minLng, minLat],
+              [maxLng, minLat],
+              [maxLng, maxLat],
+              [minLng, maxLat],
+              [minLng, minLat]
+            ]
+          ]
+        },
+        properties: {}
+      }
+    ]
+  } as FeatureCollection<Polygon, Record<string, unknown>>);
+}
+
+function ensureSiteResultLayers(map: MaplibreMap) {
+  if (!map.getSource(SITE_RESULT_SOURCE_ID)) {
+    map.addSource(SITE_RESULT_SOURCE_ID, {
+      type: 'geojson',
+      data: emptySiteResultCollection
+    });
+    map.addLayer({
+      id: SITE_RESULT_POINT_ID,
+      type: 'circle',
+      source: SITE_RESULT_SOURCE_ID,
+      paint: {
+        'circle-radius': 8,
+        'circle-color': '#ff6b6b',
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2
+      }
+    });
+    map.addLayer({
+      id: SITE_RESULT_HIGHLIGHT_ID,
+      type: 'circle',
+      source: SITE_RESULT_SOURCE_ID,
+      filter: ['==', ['get', 'rank'], -1],
+      paint: {
+        'circle-radius': 12,
+        'circle-color': '#ffd43b',
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2.5,
+        'circle-opacity': 0.85
+      }
+    });
+    map.addLayer({
+      id: SITE_RESULT_LABEL_ID,
+      type: 'symbol',
+      source: SITE_RESULT_SOURCE_ID,
+      layout: {
+        'text-field': ['get', 'rank'],
+        'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+        'text-size': 12,
+        'text-offset': [0, 0]
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': 'rgba(0,0,0,0.35)',
+        'text-halo-width': 1.2
+      }
+    });
+  }
+}
+
+function setSiteResults(results: Array<{ rank: number; lng: number; lat: number; total: number }>) {
+  const map = mapInstance.value;
+  if (!map) return;
+  ensureSiteResultLayers(map);
+  const source = map.getSource(SITE_RESULT_SOURCE_ID) as GeoJSONSource | undefined;
+  if (!source) return;
+  if (!results.length) {
+    source.setData(emptySiteResultCollection);
+    return;
+  }
+  source.setData({
+    type: 'FeatureCollection',
+    features: results.map((item) => ({
+      type: 'Feature',
+      geometry: {
+        type: 'Point',
+        coordinates: [item.lng, item.lat]
+      },
+      properties: {
+        rank: item.rank,
+        total: item.total
+      }
+    }))
+  } as FeatureCollection<Point, Record<string, unknown>>);
+}
+
+function updateSiteResultHighlight(rank: number | null) {
+  const map = mapInstance.value;
+  if (!map) return;
+  if (!map.getLayer(SITE_RESULT_HIGHLIGHT_ID)) {
+    ensureSiteResultLayers(map);
+  }
+  const filter = typeof rank === 'number' ? ['==', ['get', 'rank'], rank] : ['==', ['get', 'rank'], -1];
+  map.setFilter(SITE_RESULT_HIGHLIGHT_ID, filter as any);
+}
+
+function focusSiteResult(rank: number | null) {
+  if (typeof rank !== 'number') return;
+  const target = siteEngine.value.results.find((item) => item.rank === rank);
+  if (!target) return;
+  const map = mapInstance.value;
+  if (!map) return;
+  const nextZoom = Math.max(map.getZoom(), 14);
+  map.easeTo({
+    center: [target.lng, target.lat],
+    zoom: nextZoom
+  });
+}
+
 function syncGroupLayers(map: MaplibreMap) {
   const selected = new Set(poiEngine.value.selectedGroups);
   const includeHull = poiEngine.value.showClusterExtent;
@@ -755,15 +1119,17 @@ function setupMap() {
   if (!mapContainer.value) return;
 
   logBasemapConfig();
-  const mapInstanceLocal = new maplibregl.Map({
+  const mapOptions: maplibregl.MapOptions & { preserveDrawingBuffer?: boolean } = {
     container: mapContainer.value,
     style: buildInitialStyle(),
     center: map.value.center as LngLatLike,
     zoom: map.value.zoom,
     minZoom: MIN_ZOOM,
     maxZoom: MAX_ZOOM,
+    // Keep drawing buffer so PNG export can read the canvas.
     preserveDrawingBuffer: true
-  });
+  };
+  const mapInstanceLocal = new maplibregl.Map(mapOptions);
 
   const resizeTarget = mapContainer.value?.parentElement ?? mapContainer.value;
   attachResizeObserver(resizeTarget);
@@ -814,11 +1180,14 @@ function setupMap() {
   );
 
   mapInstanceLocal.addControl(geocoder, 'top-left');
+  requestAnimationFrame(() => attachGeocoderSearchButton(geocoder, mapInstanceLocal));
 
   mapInstanceLocal.on('load', () => {
     ensureIsochroneLayers(mapInstanceLocal);
     ensureIsoOriginLayers(mapInstanceLocal);
     ensureRouteLayer(mapInstanceLocal);
+    ensureSiteBboxLayers(mapInstanceLocal);
+    ensureSiteResultLayers(mapInstanceLocal);
     syncGroupLayers(mapInstanceLocal);
     store.setMapReady(true);
     scheduleMapResize();
@@ -838,11 +1207,43 @@ function setupMap() {
     if (route.value.active) {
       setRouteEndpoint(route.value.end, route.value.active);
     }
+    setSiteBbox(siteEngine.value.bbox);
+    setSiteResults(siteEngine.value.results);
+    updateSiteResultHighlight(siteEngine.value.selectedRank);
     scheduleViewportQuery();
   });
 
   mapInstanceLocal.on('click', (event) => {
+    if (ui.value.bboxPickArmed) {
+      return;
+    }
+    if (ui.value.isoPickArmed) {
+      handleIsoPick([event.lngLat.lng, event.lngLat.lat]);
+      return;
+    }
     emit('map-click', [event.lngLat.lng, event.lngLat.lat]);
+  });
+
+  mapInstanceLocal.on('click', SITE_RESULT_POINT_ID, (event) => {
+    if (ui.value.bboxPickArmed || ui.value.isoPickArmed) {
+      return;
+    }
+    const feature = event.features?.[0];
+    const rank = Number((feature?.properties as { rank?: number } | undefined)?.rank);
+    if (Number.isFinite(rank)) {
+      store.selectSiteResult(rank);
+    }
+  });
+
+  mapInstanceLocal.on('click', SITE_RESULT_LABEL_ID, (event) => {
+    if (ui.value.bboxPickArmed || ui.value.isoPickArmed) {
+      return;
+    }
+    const feature = event.features?.[0];
+    const rank = Number((feature?.properties as { rank?: number } | undefined)?.rank);
+    if (Number.isFinite(rank)) {
+      store.selectSiteResult(rank);
+    }
   });
 
   mapInstanceLocal.on('moveend', () => {
@@ -857,13 +1258,19 @@ function setupMap() {
   });
 
   mapInstance.value = mapInstanceLocal;
+  updateMapCursor();
 }
 
 onMounted(() => {
   setupMap();
+  window.addEventListener('keydown', handleKeydown);
+  mapContainer.value?.addEventListener('mousedown', handleBboxMouseDown);
+  window.addEventListener('mousemove', handleBboxMouseMove);
+  window.addEventListener('mouseup', handleBboxMouseUp);
 });
 
 onBeforeUnmount(() => {
+  clearBboxDrag();
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
@@ -874,6 +1281,10 @@ onBeforeUnmount(() => {
     resizeRaf = 0;
   }
   mapInstance.value?.remove();
+  window.removeEventListener('keydown', handleKeydown);
+  mapContainer.value?.removeEventListener('mousedown', handleBboxMouseDown);
+  window.removeEventListener('mousemove', handleBboxMouseMove);
+  window.removeEventListener('mouseup', handleBboxMouseUp);
 });
 
   watch(
@@ -888,6 +1299,8 @@ onBeforeUnmount(() => {
         ensureIsochroneLayers(map);
         ensureIsoOriginLayers(map);
         ensureRouteLayer(map);
+        ensureSiteBboxLayers(map);
+        ensureSiteResultLayers(map);
         refreshGroupData(map);
         scheduleMapResize();
         if (analysis.value.isochrone) {
@@ -902,10 +1315,14 @@ onBeforeUnmount(() => {
         if (route.value.active) {
           setRouteEndpoint(route.value.end, route.value.active);
         }
+        setSiteBbox(siteEngine.value.bbox);
+        setSiteResults(siteEngine.value.results);
+        updateSiteResultHighlight(siteEngine.value.selectedRank);
         scheduleViewportQuery();
       });
     }
   );
+
 
   watch(
     () => poiEngine.value.selectedGroups,
@@ -950,6 +1367,24 @@ onBeforeUnmount(() => {
     }
   );
 
+  watch(
+    () => [ui.value.isoPickArmed, ui.value.bboxPickArmed],
+    () => {
+      updateMapCursor();
+      const map = mapInstance.value;
+      if (map) {
+        if (ui.value.bboxPickArmed) {
+          map.dragPan.disable();
+        } else {
+          map.dragPan.enable();
+        }
+      }
+      if (!ui.value.bboxPickArmed) {
+        clearBboxDrag();
+      }
+    }
+  );
+
 watch(
   () => analysis.value.isochrone,
   (geojson) => {
@@ -975,6 +1410,30 @@ watch(
   () => [route.value.active, route.value.end?.lng, route.value.end?.lat],
   () => {
     setRouteEndpoint(route.value.end, route.value.active);
+  }
+);
+
+watch(
+  () => siteEngine.value.bbox,
+  (bbox) => {
+    setSiteBbox(bbox);
+  }
+);
+
+watch(
+  () => siteEngine.value.results,
+  (results) => {
+    setSiteResults(results);
+    updateSiteResultHighlight(siteEngine.value.selectedRank);
+  },
+  { deep: true }
+);
+
+watch(
+  () => siteEngine.value.selectedRank,
+  (rank) => {
+    updateSiteResultHighlight(rank);
+    focusSiteResult(rank);
   }
 );
 
@@ -1036,5 +1495,41 @@ defineExpose({
 .map-canvas {
   position: absolute;
   inset: 0;
+}
+
+:deep(.bbox-preview) {
+  position: absolute;
+  border: 2px dashed #4c6ef5;
+  background: rgba(76, 110, 245, 0.15);
+  pointer-events: none;
+  z-index: 15;
+}
+
+:deep(.maplibregl-ctrl-geocoder) {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+:deep(.maplibregl-ctrl-geocoder--pin-right) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+:deep(.map-geocoder-search-button) {
+  border: 1px solid #adb5bd;
+  background: #ffffff;
+  border-radius: 0.45rem;
+  padding: 0 0.55rem;
+  height: 28px;
+  line-height: 26px;
+  font-size: 0.85rem;
+  color: #343a40;
+  cursor: pointer;
+}
+
+:deep(.map-geocoder-search-button:hover) {
+  background: #f1f3f5;
 }
 </style>

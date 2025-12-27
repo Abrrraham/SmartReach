@@ -40,6 +40,20 @@ type PoiFeature = Feature<Point, PoiProperties>;
 type ClusterFeature = Feature<Point, PoiProperties | ClusterProperties>;
 type PolygonFeature = Feature<Polygon, Record<string, unknown>>;
 type IsoPolygonFeature = Feature<Polygon | MultiPolygon, Record<string, unknown>>;
+type Bbox = [number, number, number, number];
+type SiteCandidate = {
+  lng: number;
+  lat: number;
+  metrics: {
+    demand: number;
+    access: number;
+    competition: number;
+    synergy: number;
+    center: number;
+  };
+  total: number;
+  debug?: Record<string, number>;
+};
 
 const DEFAULT_RULES: TypeRules = {
   groups: [
@@ -134,7 +148,25 @@ let coordConfig: CoordSysConfig = {
 let groupPoints = new Map<string, RawPoint[]>();
 let groupIndexes = new Map<string, Supercluster<PoiProperties>>();
 let isoIndexes = new Map<string, Supercluster<PoiProperties>>();
+let allIndex: Supercluster<PoiProperties> | null = null;
 let typeCounts: Record<string, number> = {};
+const COUNT_ZOOM = 15;
+const SITE_DEFAULTS = {
+  gridSpacingMeters: 400,
+  maxCandidates: 800,
+  radiusCompetition: 800,
+  radiusDemand: 800,
+  radiusSynergy: 800,
+  radiusAccessMax: 5000
+};
+const SYNERGY_GROUPS = ['shopping', 'food', 'life_service', 'entertainment_sports', 'tourism'];
+const SITE_WEIGHTS = {
+  demand: 0.35,
+  access: 0.2,
+  competition: 0.25,
+  synergy: 0.15,
+  center: 0.05
+};
 
 function cleanRawType(raw: string): string {
   return raw
@@ -275,6 +307,9 @@ function addPoint(point: RawPoint) {
 
 function buildPoints(rawData: unknown): void {
   groupPoints = new Map();
+  groupIndexes.clear();
+  isoIndexes.clear();
+  allIndex = null;
   typeCounts = {};
 
   if (
@@ -395,6 +430,168 @@ function buildIndex(points: RawPoint[]) {
   return index;
 }
 
+function ensureAllIndex() {
+  if (allIndex) {
+    return;
+  }
+  const allPoints: RawPoint[] = [];
+  groupPoints.forEach((list) => {
+    list.forEach((point) => {
+      allPoints.push(point);
+    });
+  });
+  allIndex = buildIndex(allPoints);
+}
+
+function countClusters(
+  index: Supercluster<PoiProperties>,
+  bbox: Bbox,
+  zoom: number = COUNT_ZOOM
+): number {
+  const clusters = index.getClusters(bbox, zoom) as ClusterFeature[];
+  return clusters.reduce((sum, feature) => {
+    const props = feature.properties as ClusterProperties | undefined;
+    if (props?.cluster) {
+      return sum + Number(props.point_count ?? 0);
+    }
+    return sum + 1;
+  }, 0);
+}
+
+function degreesToRadians(value: number) {
+  return (value * Math.PI) / 180;
+}
+
+function metersPerDegreeLat() {
+  return 111320;
+}
+
+function metersPerDegreeLng(lat: number) {
+  return 111320 * Math.cos(degreesToRadians(lat));
+}
+
+function metersToLatDelta(meters: number) {
+  return meters / metersPerDegreeLat();
+}
+
+function metersToLngDelta(meters: number, lat: number) {
+  const base = metersPerDegreeLng(lat);
+  if (!Number.isFinite(base) || base === 0) {
+    return meters / metersPerDegreeLat();
+  }
+  return meters / base;
+}
+
+function haversineMeters(a: [number, number], b: [number, number]) {
+  const [lng1, lat1] = a;
+  const [lng2, lat2] = b;
+  const radLat1 = degreesToRadians(lat1);
+  const radLat2 = degreesToRadians(lat2);
+  const deltaLat = radLat2 - radLat1;
+  const deltaLng = degreesToRadians(lng2 - lng1);
+  const sinLat = Math.sin(deltaLat / 2);
+  const sinLng = Math.sin(deltaLng / 2);
+  const h =
+    sinLat * sinLat +
+    Math.cos(radLat1) * Math.cos(radLat2) * sinLng * sinLng;
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function countWithinRadius(
+  index: Supercluster<PoiProperties>,
+  center: [number, number],
+  radiusMeters: number
+) {
+  const [lng, lat] = center;
+  const deltaLat = metersToLatDelta(radiusMeters);
+  const deltaLng = metersToLngDelta(radiusMeters, lat);
+  const bbox: Bbox = [lng - deltaLng, lat - deltaLat, lng + deltaLng, lat + deltaLat];
+  return countClusters(index, bbox);
+}
+
+function nearestDistanceMeters(
+  index: Supercluster<PoiProperties>,
+  center: [number, number],
+  maxRadiusMeters: number
+): number | null {
+  const steps = [400, 800, 1600, 3200, 6400];
+  for (const radius of steps) {
+    if (radius > maxRadiusMeters) break;
+    const [lng, lat] = center;
+    const deltaLat = metersToLatDelta(radius);
+    const deltaLng = metersToLngDelta(radius, lat);
+    const bbox: Bbox = [lng - deltaLng, lat - deltaLat, lng + deltaLng, lat + deltaLat];
+    const clusters = index.getClusters(bbox, COUNT_ZOOM) as ClusterFeature[];
+    if (!clusters.length) {
+      continue;
+    }
+    let minDist = Infinity;
+    clusters.forEach((feature) => {
+      if (!feature.geometry || feature.geometry.type !== 'Point') {
+        return;
+      }
+      const coords = feature.geometry.coordinates as [number, number];
+      const dist = haversineMeters(center, coords);
+      if (dist < minDist) {
+        minDist = dist;
+      }
+    });
+    if (Number.isFinite(minDist)) {
+      return minDist;
+    }
+  }
+  return null;
+}
+
+function normalizeMetric(
+  value: number,
+  min: number,
+  max: number,
+  invert = false
+) {
+  if (!Number.isFinite(value) || !Number.isFinite(min) || !Number.isFinite(max)) {
+    return 0.5;
+  }
+  if (max - min === 0) {
+    return 0.5;
+  }
+  const raw = (value - min) / (max - min);
+  const clamped = Math.min(Math.max(raw, 0), 1);
+  return invert ? 1 - clamped : clamped;
+}
+
+function buildCandidateGrid(
+  bbox: Bbox,
+  spacingMeters: number,
+  maxCandidates: number
+) {
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  const centerLat = (minLat + maxLat) / 2;
+  const widthM = Math.abs(maxLng - minLng) * metersPerDegreeLng(centerLat);
+  const heightM = Math.abs(maxLat - minLat) * metersPerDegreeLat();
+  let spacing = spacingMeters;
+  const estimate = Math.max(1, Math.floor(widthM / spacing)) * Math.max(1, Math.floor(heightM / spacing));
+  if (estimate > maxCandidates) {
+    spacing *= Math.sqrt(estimate / maxCandidates);
+  }
+  const latStep = metersToLatDelta(spacing);
+  const lngStep = metersToLngDelta(spacing, centerLat);
+  const candidates: Array<{ lng: number; lat: number }> = [];
+  for (let lat = minLat + latStep / 2; lat <= maxLat; lat += latStep) {
+    for (let lng = minLng + lngStep / 2; lng <= maxLng; lng += lngStep) {
+      candidates.push({ lng, lat });
+    }
+  }
+  if (!candidates.length) {
+    candidates.push({ lng: (minLng + maxLng) / 2, lat: (minLat + maxLat) / 2 });
+  }
+  if (candidates.length > maxCandidates) {
+    const stride = Math.ceil(candidates.length / maxCandidates);
+    return candidates.filter((_, index) => index % stride === 0).slice(0, maxCandidates);
+  }
+  return candidates;
+}
+
 function updateBbox(
   bbox: [number, number, number, number],
   coord: [number, number]
@@ -503,6 +700,18 @@ function buildClusterPolygon(
 type IncomingMessage =
   | { type: 'INIT'; payload: { poiUrl: string; rulesUrl: string; coordSysConfig: CoordSysConfig } }
   | { type: 'BUILD_INDEX'; payload: { groups: string[] } }
+  | { type: 'BBOX_STATS'; payload: { bbox: Bbox; requestId: number } }
+  | {
+      type: 'SITE_SELECT';
+      payload: {
+        bbox: Bbox;
+        targetGroupId: string;
+        topN: number;
+        maxCandidates?: number;
+        gridSpacingMeters?: number;
+        requestId: number;
+      };
+    }
   | {
       type: 'QUERY';
       payload: {
@@ -519,193 +728,390 @@ type IncomingMessage =
   | { type: 'CLEAR_ISOCHRONE' };
 
 self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
-  const { type, payload } = event.data;
+  const message = event.data;
   try {
-    if (type === 'INIT') {
-      const { poiUrl, rulesUrl, coordSysConfig: incoming } = payload;
-      coordConfig = {
-        poiCoordSys: normalizeCoordSys(incoming.poiCoordSys, 'WGS84'),
-        mapCoordSys: normalizeCoordSys(incoming.mapCoordSys, 'WGS84')
-      };
-      await loadRules(rulesUrl);
-      const response = await fetch(poiUrl, { cache: 'no-cache' });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      }
-      const rawData = await response.json();
-      buildPoints(rawData);
-      self.postMessage({
-        type: 'INIT_DONE',
-        payload: {
-          total: Object.values(typeCounts).reduce((sum, value) => sum + value, 0),
-          typeCounts,
-          rulesMeta: rules.meta ?? null
+    // Use a discriminated switch to keep payload access type-safe.
+    switch (message.type) {
+      case 'INIT': {
+        const { poiUrl, rulesUrl, coordSysConfig: incoming } = message.payload;
+        coordConfig = {
+          poiCoordSys: normalizeCoordSys(incoming.poiCoordSys, 'WGS84'),
+          mapCoordSys: normalizeCoordSys(incoming.mapCoordSys, 'WGS84')
+        };
+        await loadRules(rulesUrl);
+        const response = await fetch(poiUrl, { cache: 'no-cache' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`);
         }
-      });
-      logWorker('init_done', {
-        groups: Object.keys(typeCounts).length,
-        total: Object.values(typeCounts).reduce((sum, value) => sum + value, 0)
-      });
-      return;
-    }
+        const rawData = await response.json();
+        buildPoints(rawData);
+        self.postMessage({
+          type: 'INIT_DONE',
+          payload: {
+            total: Object.values(typeCounts).reduce((sum, value) => sum + value, 0),
+            typeCounts,
+            rulesMeta: rules.meta ?? null
+          }
+        });
+        logWorker('init_done', {
+          groups: Object.keys(typeCounts).length,
+          total: Object.values(typeCounts).reduce((sum, value) => sum + value, 0)
+        });
+        return;
+      }
+      case 'BUILD_INDEX': {
+        const groups = message.payload.groups.filter((group) => group && group !== 'address');
+        groups.forEach((group) => ensureIndex(group));
+        self.postMessage({
+          type: 'INDEX_READY',
+          payload: { groups }
+        });
+        logWorker('index_ready', { groups });
+        return;
+      }
+      case 'BBOX_STATS': {
+        const { bbox, requestId } = message.payload;
+        const byGroup: Record<string, number> = {};
+        let poiTotal = 0;
+        const groups = Array.from(groupPoints.keys()).filter(
+          (group) => group && group !== 'address'
+        );
+        groups.forEach((group) => {
+          ensureIndex(group);
+          const index = groupIndexes.get(group);
+          if (!index) return;
+          const count = countClusters(index, bbox);
+          byGroup[group] = count;
+          poiTotal += count;
+        });
+        self.postMessage({
+          type: 'BBOX_STATS_RESULT',
+          payload: { requestId, poiTotal, byGroup }
+        });
+        logWorker('bbox_stats', { requestId, groups: groups.length, poiTotal });
+        return;
+      }
+      case 'SITE_SELECT': {
+        const {
+          bbox,
+          targetGroupId,
+          topN,
+          maxCandidates = SITE_DEFAULTS.maxCandidates,
+          gridSpacingMeters = SITE_DEFAULTS.gridSpacingMeters,
+          requestId
+        } = message.payload;
+        if (!targetGroupId || targetGroupId === 'address') {
+          self.postMessage({
+            type: 'SITE_SELECT_RESULT',
+            payload: { requestId, results: [] }
+          });
+          return;
+        }
+        ensureIndex(targetGroupId);
+        const targetIndex = groupIndexes.get(targetGroupId);
+        if (!targetIndex) {
+          self.postMessage({
+            type: 'SITE_SELECT_RESULT',
+            payload: { requestId, results: [] }
+          });
+          return;
+        }
+        ensureAllIndex();
+        const totalIndex = allIndex;
+        let transportIndex: Supercluster<PoiProperties> | null = null;
+        if (groupPoints.has('transport')) {
+          ensureIndex('transport');
+          transportIndex = groupIndexes.get('transport') ?? null;
+        }
+        const synergyGroups = SYNERGY_GROUPS.filter((group) => groupPoints.has(group));
+        synergyGroups.forEach((group) => ensureIndex(group));
+        const synergyIndexes = synergyGroups
+          .map((group) => groupIndexes.get(group))
+          .filter((index): index is Supercluster<PoiProperties> => Boolean(index));
 
-    if (type === 'BUILD_INDEX') {
-      const groups = payload.groups.filter((group) => group && group !== 'address');
-      groups.forEach((group) => ensureIndex(group));
-      self.postMessage({
-        type: 'INDEX_READY',
-        payload: { groups }
-      });
-      logWorker('index_ready', { groups });
-      return;
-    }
-
-    if (type === 'QUERY') {
-      const { bbox, zoom, groups, requestId, includeHull, useIso } = payload;
-      const shouldIncludeHull = Boolean(includeHull);
-      const useIsoIndex = Boolean(useIso);
-      logWorker('query_recv', {
-        requestId,
-        bbox,
-        zoom,
-        groups,
-        includeHull: shouldIncludeHull,
-        useIso: useIsoIndex
-      });
-      const results: Record<string, { points: FeatureCollection<Point>; hulls: FeatureCollection<Polygon> }> = {};
-      const counts: Record<string, { pointsCount: number; clustersCount: number }> | undefined = DEV_LOG
-        ? {}
-        : undefined;
-      groups
-        .filter((group) => group && group !== 'address')
-        .forEach((group) => {
-          if (!useIsoIndex) {
-            ensureIndex(group);
-          }
-          const index = useIsoIndex ? isoIndexes.get(group) : groupIndexes.get(group);
-          if (!index) {
-            results[group] = {
-              points: { type: 'FeatureCollection', features: [] },
-              hulls: { type: 'FeatureCollection', features: [] }
-            };
-            if (counts) {
-              counts[group] = { pointsCount: 0, clustersCount: 0 };
-            }
-            return;
-          }
-          const clusters = index.getClusters(bbox, zoom) as ClusterFeature[];
-          if (counts) {
-            const clustersCount = clusters.filter(
-              (feature) => Boolean((feature.properties as ClusterProperties | undefined)?.cluster)
-            ).length;
-            const pointsCount = clusters.length - clustersCount;
-            counts[group] = { pointsCount, clustersCount };
-          }
-          const hulls: PolygonFeature[] = [];
-          if (shouldIncludeHull && zoom <= HULL_MAX_ZOOM) {
-            clusters.forEach((feature) => {
-              const props = feature.properties as ClusterProperties | undefined;
-              if (!props?.cluster) return;
-              const count = Number(props.point_count ?? 0);
-              if (count < HULL_MIN_COUNT) return;
-              const clusterId = Number((props as { cluster_id?: number }).cluster_id);
-              if (!Number.isFinite(clusterId)) return;
-              const polygon = buildClusterPolygon(index, clusterId);
-              if (!polygon) return;
-              polygon.properties = {
-                group,
-                cluster_id: clusterId,
-                point_count: count
-              };
-              hulls.push(polygon);
-            });
-          }
-          results[group] = {
-            points: { type: 'FeatureCollection', features: clusters as Feature<Point, PoiProperties>[] },
-            hulls: { type: 'FeatureCollection', features: hulls }
+        const candidates = buildCandidateGrid(bbox, gridSpacingMeters, maxCandidates);
+        if (!candidates.length) {
+          self.postMessage({
+            type: 'SITE_SELECT_RESULT',
+            payload: { requestId, results: [] }
+          });
+          return;
+        }
+        const center: [number, number] = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+        const raw = candidates.map((candidate) => {
+          const coord: [number, number] = [candidate.lng, candidate.lat];
+          const competitionCount = countWithinRadius(
+            targetIndex,
+            coord,
+            SITE_DEFAULTS.radiusCompetition
+          );
+          const demandTotal = totalIndex
+            ? countWithinRadius(totalIndex, coord, SITE_DEFAULTS.radiusDemand)
+            : competitionCount;
+          const demandTarget = countWithinRadius(
+            targetIndex,
+            coord,
+            SITE_DEFAULTS.radiusDemand
+          );
+          const demandCount = Math.max(demandTotal - demandTarget, 0);
+          const synergyCount = synergyIndexes.reduce(
+            (sum, index) =>
+              sum + countWithinRadius(index, coord, SITE_DEFAULTS.radiusSynergy),
+            0
+          );
+          const accessSource = transportIndex ?? totalIndex;
+          const accessDistance = accessSource
+            ? nearestDistanceMeters(accessSource, coord, SITE_DEFAULTS.radiusAccessMax) ??
+              SITE_DEFAULTS.radiusAccessMax
+            : SITE_DEFAULTS.radiusAccessMax;
+          const centerDistance = haversineMeters(coord, center);
+          return {
+            coord,
+            competitionCount,
+            demandCount,
+            synergyCount,
+            accessDistance,
+            centerDistance
           };
         });
-      self.postMessage({
-        type: 'QUERY_RESULT',
-        payload: { requestId, results }
-      });
-      logWorker('query_result', { requestId, groups: Object.keys(results).length, counts });
-      return;
-    }
 
-    if (type === 'EXPAND') {
-      const { group, clusterId, requestId, useIso } = payload;
-      const useIsoIndex = Boolean(useIso);
-      if (!useIsoIndex) {
-        ensureIndex(group);
-      }
-      const index = useIsoIndex ? isoIndexes.get(group) : groupIndexes.get(group);
-      const zoom = index ? index.getClusterExpansionZoom(clusterId) : null;
-      self.postMessage({
-        type: 'EXPAND_RESULT',
-        payload: { requestId, zoom }
-      });
-      return;
-    }
+        const compValues = raw.map((item) => item.competitionCount);
+        const demandValues = raw.map((item) => item.demandCount);
+        const synergyValues = raw.map((item) => item.synergyCount);
+        const accessValues = raw.map((item) => item.accessDistance);
+        const centerValues = raw.map((item) => item.centerDistance);
+        const minMax = (values: number[]) => ({
+          min: Math.min(...values),
+          max: Math.max(...values)
+        });
+        const compExtent = minMax(compValues);
+        const demandExtent = minMax(demandValues);
+        const synergyExtent = minMax(synergyValues);
+        const accessExtent = minMax(accessValues);
+        const centerExtent = minMax(centerValues);
 
-    if (type === 'APPLY_ISOCHRONE') {
-      const { polygon, groups, requestId } = payload;
-      const geometry = polygon?.geometry;
-      if (!geometry || (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon')) {
-        clearIsochrones();
+        const results: SiteCandidate[] = raw.map((item) => {
+          const demand = normalizeMetric(
+            item.demandCount,
+            demandExtent.min,
+            demandExtent.max
+          );
+          const competition = normalizeMetric(
+            item.competitionCount,
+            compExtent.min,
+            compExtent.max,
+            true
+          );
+          const synergy = normalizeMetric(
+            item.synergyCount,
+            synergyExtent.min,
+            synergyExtent.max
+          );
+          const access = normalizeMetric(
+            item.accessDistance,
+            accessExtent.min,
+            accessExtent.max,
+            true
+          );
+          const centerScore = normalizeMetric(
+            item.centerDistance,
+            centerExtent.min,
+            centerExtent.max,
+            true
+          );
+          const total =
+            demand * SITE_WEIGHTS.demand +
+            access * SITE_WEIGHTS.access +
+            competition * SITE_WEIGHTS.competition +
+            synergy * SITE_WEIGHTS.synergy +
+            centerScore * SITE_WEIGHTS.center;
+          return {
+            lng: item.coord[0],
+            lat: item.coord[1],
+            total,
+            metrics: {
+              demand,
+              access,
+              competition,
+              synergy,
+              center: centerScore
+            },
+            debug: {
+              demandCount: item.demandCount,
+              competitionCount: item.competitionCount,
+              synergyCount: item.synergyCount,
+              accessMeters: item.accessDistance,
+              centerMeters: item.centerDistance
+            }
+          };
+        });
+
+        results.sort((a, b) => b.total - a.total);
         self.postMessage({
-          type: 'ISO_INDEX_READY',
-          payload: { requestId, countsByGroup: {}, builtGroups: [], tookMs: 0 }
+          type: 'SITE_SELECT_RESULT',
+          payload: { requestId, results: results.slice(0, Math.max(1, topN)) }
         });
-        return;
-      }
-      const bbox = getPolygonBbox(geometry);
-      if (!bbox) {
-        clearIsochrones();
-        self.postMessage({
-          type: 'ISO_INDEX_READY',
-          payload: { requestId, countsByGroup: {}, builtGroups: [], tookMs: 0 }
-        });
-        return;
-      }
-      const countsByGroup: Record<string, number> = {};
-      const pointsByGroup: Record<string, RawPoint[]> = {};
-      const builtGroups: string[] = [];
-      const startedAt = Date.now();
-      groups
-        .filter((group) => group && group !== 'address')
-        .forEach((group) => {
-          const inside = buildIsoIndex(group, polygon, bbox);
-          pointsByGroup[group] = inside;
-          countsByGroup[group] = inside.length;
-          builtGroups.push(group);
-        });
-      self.postMessage({
-        type: 'ISO_INDEX_READY',
-        payload: {
+        logWorker('site_select', {
           requestId,
-          countsByGroup,
-          pointsByGroup,
-          builtGroups,
-          tookMs: Date.now() - startedAt
+          candidates: candidates.length,
+          results: Math.min(results.length, topN)
+        });
+        return;
+      }
+      case 'QUERY': {
+        const { bbox, zoom, groups, requestId, includeHull, useIso } = message.payload;
+        const shouldIncludeHull = Boolean(includeHull);
+        const useIsoIndex = Boolean(useIso);
+        logWorker('query_recv', {
+          requestId,
+          bbox,
+          zoom,
+          groups,
+          includeHull: shouldIncludeHull,
+          useIso: useIsoIndex
+        });
+        const results: Record<string, { points: FeatureCollection<Point>; hulls: FeatureCollection<Polygon> }> = {};
+        const counts: Record<string, { pointsCount: number; clustersCount: number }> | undefined = DEV_LOG
+          ? {}
+          : undefined;
+        groups
+          .filter((group) => group && group !== 'address')
+          .forEach((group) => {
+            if (!useIsoIndex) {
+              ensureIndex(group);
+            }
+            const index = useIsoIndex ? isoIndexes.get(group) : groupIndexes.get(group);
+            if (!index) {
+              results[group] = {
+                points: { type: 'FeatureCollection', features: [] },
+                hulls: { type: 'FeatureCollection', features: [] }
+              };
+              if (counts) {
+                counts[group] = { pointsCount: 0, clustersCount: 0 };
+              }
+              return;
+            }
+            const clusters = index.getClusters(bbox, zoom) as ClusterFeature[];
+            if (counts) {
+              const clustersCount = clusters.filter(
+                (feature) => Boolean((feature.properties as ClusterProperties | undefined)?.cluster)
+              ).length;
+              const pointsCount = clusters.length - clustersCount;
+              counts[group] = { pointsCount, clustersCount };
+            }
+            const hulls: PolygonFeature[] = [];
+            if (shouldIncludeHull && zoom <= HULL_MAX_ZOOM) {
+              clusters.forEach((feature) => {
+                const props = feature.properties as ClusterProperties | undefined;
+                if (!props?.cluster) return;
+                const count = Number(props.point_count ?? 0);
+                if (count < HULL_MIN_COUNT) return;
+                const clusterId = Number((props as { cluster_id?: number }).cluster_id);
+                if (!Number.isFinite(clusterId)) return;
+                const polygon = buildClusterPolygon(index, clusterId);
+                if (!polygon) return;
+                polygon.properties = {
+                  group,
+                  cluster_id: clusterId,
+                  point_count: count
+                };
+                hulls.push(polygon);
+              });
+            }
+            results[group] = {
+              points: { type: 'FeatureCollection', features: clusters as Feature<Point, PoiProperties>[] },
+              hulls: { type: 'FeatureCollection', features: hulls }
+            };
+          });
+        self.postMessage({
+          type: 'QUERY_RESULT',
+          payload: { requestId, results }
+        });
+        logWorker('query_result', { requestId, groups: Object.keys(results).length, counts });
+        return;
+      }
+      case 'EXPAND': {
+        const { group, clusterId, requestId, useIso } = message.payload;
+        const useIsoIndex = Boolean(useIso);
+        if (!useIsoIndex) {
+          ensureIndex(group);
         }
-      });
-      logWorker('iso_index_ready', {
-        requestId,
-        groups: builtGroups.length,
-        tookMs: Date.now() - startedAt
-      });
-      return;
-    }
-
-    if (type === 'CLEAR_ISOCHRONE') {
-      clearIsochrones();
-      self.postMessage({ type: 'ISO_CLEARED' });
-      logWorker('iso_cleared');
-      return;
+        const index = useIsoIndex ? isoIndexes.get(group) : groupIndexes.get(group);
+        const zoom = index ? index.getClusterExpansionZoom(clusterId) : null;
+        self.postMessage({
+          type: 'EXPAND_RESULT',
+          payload: { requestId, zoom }
+        });
+        return;
+      }
+      case 'APPLY_ISOCHRONE': {
+        const { polygon, groups, requestId } = message.payload;
+        const geometry = polygon?.geometry;
+        if (!geometry || (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon')) {
+          clearIsochrones();
+          self.postMessage({
+            type: 'ISO_INDEX_READY',
+            payload: { requestId, countsByGroup: {}, builtGroups: [], tookMs: 0 }
+          });
+          return;
+        }
+        const bbox = getPolygonBbox(geometry);
+        if (!bbox) {
+          clearIsochrones();
+          self.postMessage({
+            type: 'ISO_INDEX_READY',
+            payload: { requestId, countsByGroup: {}, builtGroups: [], tookMs: 0 }
+          });
+          return;
+        }
+        const countsByGroup: Record<string, number> = {};
+        const pointsByGroup: Record<string, RawPoint[]> = {};
+        const builtGroups: string[] = [];
+        const startedAt = Date.now();
+        groups
+          .filter((group) => group && group !== 'address')
+          .forEach((group) => {
+            const inside = buildIsoIndex(group, polygon, bbox);
+            pointsByGroup[group] = inside;
+            countsByGroup[group] = inside.length;
+            builtGroups.push(group);
+          });
+        self.postMessage({
+          type: 'ISO_INDEX_READY',
+          payload: {
+            requestId,
+            countsByGroup,
+            pointsByGroup,
+            builtGroups,
+            tookMs: Date.now() - startedAt
+          }
+        });
+        logWorker('iso_index_ready', {
+          requestId,
+          groups: builtGroups.length,
+          tookMs: Date.now() - startedAt
+        });
+        return;
+      }
+      case 'CLEAR_ISOCHRONE': {
+        clearIsochrones();
+        self.postMessage({ type: 'ISO_CLEARED' });
+        logWorker('iso_cleared');
+        return;
+      }
+      default:
+        return;
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    self.postMessage({ type: 'ERROR', payload: { message } });
+    const messageText = error instanceof Error ? error.message : 'Unknown error';
+    const stack = error instanceof Error ? error.stack : undefined;
+    const sourceType = message?.type ?? 'UNKNOWN';
+    self.postMessage({
+      type: 'ERROR',
+      payload: { message: messageText, stack, sourceType }
+    });
+    if (DEV_LOG) {
+      console.error('[poi-worker] error', { sourceType, message: messageText, stack });
+    }
   }
 };

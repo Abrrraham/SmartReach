@@ -20,21 +20,8 @@
     </nav>
 
     <section v-if="activeTab === 'layers'" class="panel-section" aria-label="图层控制">
-      <h3>底图设置</h3>
-      <label class="form-label" for="style-url-input">样式 URL</label>
-      <input
-        id="style-url-input"
-        v-model="styleUrl"
-        class="text-input"
-        type="url"
-        placeholder="MapLibre 样式 URL"
-        @change="updateStyleUrl"
-      />
-      <button type="button" class="button button--ghost" @click="clearStyleUrl">
-        使用默认样式
-      </button>
       <button type="button" class="button button--ghost" @click="fitNanjing">
-        南京全域
+        定位南京
       </button>
 
       <h3>POI 类型 (type_group)</h3>
@@ -90,8 +77,13 @@
         </label>
       </fieldset>
 
-      <button type="button" class="button button--primary" @click="requestIsochrone">
-        生成等时圈
+      <button
+        type="button"
+        class="button button--primary"
+        :disabled="isIsoActionDisabled"
+        @click="toggleIsoPick"
+      >
+        {{ ui.isoPickArmed ? '取消生成' : '生成等时圈' }}
       </button>
       <button type="button" class="button button--ghost" @click="clearIsochrones">
         清除等时圈
@@ -105,24 +97,64 @@
         当前为近似圆（未配置 ORS Key 或服务不可用）
       </p>
 
-      <h3>圈内找点</h3>
-      <p class="helper-text">地图圈选后，列表将同步展示圈内设施。</p>
+      <h3>智能选址</h3>
+      <label class="form-label" for="site-group-select">商铺类型</label>
+      <select
+        id="site-group-select"
+        v-model="selectedTargetGroup"
+        class="select-input"
+      >
+        <option value="">请选择类型</option>
+        <option v-for="group in siteGroupOptions" :key="group.id" :value="group.id">
+          {{ group.label }}
+        </option>
+      </select>
 
-      <h3>智能选址权重</h3>
-      <div class="slider-group">
-        <label v-for="key in weightKeys" :key="key" class="slider-group__item">
-          <span>{{ weightLabels[key] }} {{ weights[key] }}</span>
-          <input
-            type="range"
-            min="0"
-            max="10"
-            :value="weights[key]"
-            @input="updateWeight(key, $event)"
-          />
-        </label>
+      <div class="button-group button-group--row">
+        <button type="button" class="button button--ghost" @click="toggleBboxPick">
+          {{ bboxPickLabel }}
+        </button>
+        <button type="button" class="button button--ghost" @click="clearSiteSelection">
+          清除结果
+        </button>
       </div>
-      <button type="button" class="button button--secondary" @click="scoreSites">
-        计算候选评分
+
+      <div v-if="siteEngine.bbox && siteEngine.bboxStats" class="bbox-stats">
+        <div class="bbox-stat">
+          <span>面积</span>
+          <strong>{{ formatKm2(siteEngine.bboxStats.areaKm2) }} km²</strong>
+        </div>
+        <div class="bbox-stat">
+          <span>宽度</span>
+          <strong>{{ formatKm(siteEngine.bboxStats.widthKm) }} km</strong>
+        </div>
+        <div class="bbox-stat">
+          <span>高度</span>
+          <strong>{{ formatKm(siteEngine.bboxStats.heightKm) }} km</strong>
+        </div>
+        <div class="bbox-stat">
+          <span>POI 总量</span>
+          <strong>{{ siteEngine.bboxStats.poiTotal }}</strong>
+        </div>
+        <div v-if="targetGroupCount !== null" class="bbox-stat">
+          <span>目标类数量</span>
+          <strong>{{ targetGroupCount }}</strong>
+        </div>
+      </div>
+      <p v-else-if="siteEngine.bbox" class="helper-text">正在统计范围内 POI…</p>
+      <p v-else class="helper-text">请先框选分析范围。</p>
+
+      <p v-if="overLimitMessage" class="helper-text helper-text--warn">
+        {{ overLimitMessage }}
+      </p>
+
+      <button
+        type="button"
+        class="button button--primary"
+        :disabled="isSiteActionDisabled"
+        @click="runSiteSelection"
+      >
+        {{ siteActionLabel }}
       </button>
     </section>
 
@@ -137,9 +169,6 @@
       <button type="button" class="button button--ghost" @click="exportPoiCsv">
         导出圈内 CSV
       </button>
-        <button type="button" class="button button--ghost" @click="exportCandidateCsv">
-          导出候选评分
-        </button>
         <button type="button" class="button button--ghost" @click="exportMapPng">
           导出地图 PNG
         </button>
@@ -151,18 +180,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store/app';
 import { GROUP_COLORS, GROUP_LABELS, GROUP_ORDER } from '../utils/poiGroups';
 import UploadModal from './UploadModal.vue';
-
-interface WeightLabels {
-  demand: string;
-  accessibility: string;
-  density: string;
-  constraint: string;
-}
 
 const tabs = [
   { value: 'layers', label: '图层' },
@@ -176,41 +198,28 @@ const timeOptions = [
   { value: 900, label: '15 分钟' }
 ] as const;
 
-const weightLabels: WeightLabels = {
-  demand: '需求',
-  accessibility: '可达性',
-  density: '现有密度',
-  constraint: '约束'
-};
 
 const emit = defineEmits<{
   (event: 'request-isochrone'): void;
   (event: 'export-poi-csv'): void;
-  (event: 'export-candidate-csv'): void;
   (event: 'export-map-png'): void;
   (event: 'fit-nanjing'): void;
   (event: 'upload', payload: { type: 'geojson' | 'csv'; data: unknown }): void;
 }>();
 
 const activeTab = ref<(typeof tabs)[number]['value']>('layers');
-const styleUrl = ref('');
 const isUploadOpen = ref(false);
 const selectedTimes = ref<number[]>([300, 600, 900]);
 const travelMode = ref<'foot-walking' | 'cycling-regular' | 'driving-car'>('foot-walking');
 
 const store = useAppStore();
-const { filters, map, analysis, poiEngine, iso, isoEngine } = storeToRefs(store);
+const { filters, poiEngine, iso, isoEngine, ui, siteEngine } =
+  storeToRefs(store);
 
-const weights = reactive({
-  demand: analysis.value.sitingWeights.demand,
-  accessibility: analysis.value.sitingWeights.accessibility,
-  density: analysis.value.sitingWeights.density,
-  constraint: analysis.value.sitingWeights.constraint
-});
-
-const weightKeys = computed(() => Object.keys(weights) as Array<keyof typeof weights>);
 
 const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
+const isOverlayLoading = computed(() => ui.value.overlay?.type === 'loading');
+const isIsoActionDisabled = computed(() => isOverlayLoading.value || iso.value.loading);
 
 const selectedGroups = computed({
   get: () => poiEngine.value.selectedGroups,
@@ -233,13 +242,71 @@ const sortedGroups = computed(() => {
     .sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
 });
 
-watch(
-  () => map.value.styleUrl,
-  (url) => {
-    styleUrl.value = url ?? '';
-  },
-  { immediate: true }
+const siteGroupOptions = computed(() => {
+  const counts = poiEngine.value.typeCounts;
+  const hasCounts = Object.keys(counts).length > 0;
+  const base = hasCounts ? GROUP_ORDER.filter((id) => id in counts) : GROUP_ORDER;
+  return base
+    .filter((id) => id !== 'address')
+    .map((id) => ({
+      id,
+      label: GROUP_LABELS[id] ?? id,
+      count: counts[id] ?? 0
+    }));
+});
+
+const selectedTargetGroup = computed({
+  get: () => siteEngine.value.targetGroupId ?? '',
+  set: (value: string) => {
+    store.setSiteTargetGroup(value ? value : null);
+  }
+});
+
+const bboxPickLabel = computed(() => {
+  if (ui.value.bboxPickArmed) {
+    return '取消框选';
+  }
+  if (siteEngine.value.bbox) {
+    return '重新框选';
+  }
+  return '框选范围';
+});
+
+const siteActionLabel = computed(() =>
+  siteEngine.value.results.length ? '重新计算' : '开始选址'
 );
+
+const targetGroupCount = computed(() => {
+  const stats = siteEngine.value.bboxStats;
+  const target = siteEngine.value.targetGroupId;
+  if (!stats || !stats.byGroup || !target) {
+    return null;
+  }
+  const value = stats.byGroup[target];
+  return typeof value === 'number' ? value : null;
+});
+
+const overLimitMessage = computed(() => {
+  const stats = siteEngine.value.bboxStats;
+  if (!stats) return '';
+  const { maxAreaKm2, maxPoi } = siteEngine.value.constraints;
+  if (stats.areaKm2 > maxAreaKm2) {
+    return `范围过大（>${maxAreaKm2} km²），请缩小范围。`;
+  }
+  if (stats.poiTotal > maxPoi) {
+    return `范围内 POI 过多（>${maxPoi}），请缩小范围。`;
+  }
+  return '';
+});
+
+const isSiteActionDisabled = computed(() => {
+  if (!siteEngine.value.bbox) return true;
+  if (!siteEngine.value.bboxStats) return true;
+  if (!siteEngine.value.targetGroupId) return true;
+  if (Boolean(overLimitMessage.value)) return true;
+  return siteEngine.value.running;
+});
+
 
 watch(
   () => filters.value.times,
@@ -256,15 +323,6 @@ watch(
   },
   { immediate: true }
 );
-
-function updateStyleUrl() {
-  store.setMapStyleUrl(styleUrl.value.length ? styleUrl.value : undefined);
-}
-
-function clearStyleUrl() {
-  styleUrl.value = '';
-  updateStyleUrl();
-}
 
 function selectAllGroups() {
   const ok = window.confirm('全选可能影响性能，是否继续？');
@@ -294,42 +352,48 @@ function updateTravelMode() {
   store.setTravelMode(travelMode.value);
 }
 
-function updateWeight(key: keyof typeof weights, event: Event) {
-  const target = event.target as HTMLInputElement;
-  const value = Number(target.value);
-  weights[key] = value;
+function toggleBboxPick() {
+  if (ui.value.bboxPickArmed) {
+    store.cancelBboxPick();
+    return;
+  }
+  store.armBboxPick();
 }
 
-watch(
-  () => analysis.value.sitingWeights,
-  (incoming) => {
-    weights.demand = incoming.demand;
-    weights.accessibility = incoming.accessibility;
-    weights.density = incoming.density;
-    weights.constraint = incoming.constraint;
-  },
-  { deep: true }
-);
-
-watch(
-  weights,
-  (updated) => {
-    store.updateSitingWeights(updated);
-  },
-  { deep: true }
-);
-
-function scoreSites() {
-  store.scoreCandidateSites();
+function runSiteSelection() {
+  store.runSiteSelectionTopN();
 }
+
+function clearSiteSelection() {
+  store.clearSiteSelection();
+}
+
+function formatKm(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  return value.toFixed(1);
+}
+
+function formatKm2(value: number) {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  return value.toFixed(1);
+}
+
 
 async function handleUpload(payload: { type: 'geojson' | 'csv'; data: unknown }) {
   emit('upload', payload);
   isUploadOpen.value = false;
 }
 
-function requestIsochrone() {
-  emit('request-isochrone');
+function toggleIsoPick() {
+  if (ui.value.isoPickArmed) {
+    store.cancelIsoPick();
+    return;
+  }
+  store.armIsoPick();
 }
 
 function clearIsochrones() {
@@ -340,9 +404,6 @@ function exportPoiCsv() {
   emit('export-poi-csv');
 }
 
-function exportCandidateCsv() {
-  emit('export-candidate-csv');
-}
 
 function exportMapPng() {
   emit('export-map-png');
@@ -513,6 +574,28 @@ function fitNanjing() {
   display: flex;
   gap: 0.75rem;
   flex-wrap: wrap;
+}
+
+
+.bbox-stats {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.75rem;
+  border-radius: 0.6rem;
+  background: #ffffff;
+  border: 1px solid #e9ecef;
+}
+
+.bbox-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: #343a40;
+}
+
+.bbox-stat strong {
+  font-variant-numeric: tabular-nums;
 }
 </style>
 
