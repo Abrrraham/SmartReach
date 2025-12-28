@@ -147,6 +147,8 @@ const viewportDebounceMs = 120;
 let viewportTimer: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let resizeRaf = 0;
+let compassButton: HTMLButtonElement | null = null;
+let compassResetHandler: ((event: MouseEvent) => void) | null = null;
 let bboxDragStart: { x: number; y: number } | null = null;
 let bboxDragElement: HTMLDivElement | null = null;
 let bboxDragging = false;
@@ -442,6 +444,23 @@ function logZoomDebug(map: MaplibreMap) {
     touchZoomRotate: map.touchZoomRotate.isEnabled()
   });
   (window as Window & { __map?: MaplibreMap }).__map = map;
+}
+
+function attachCompassReset(map: MaplibreMap) {
+  const compass = map.getContainer().querySelector(
+    '.maplibregl-ctrl-compass'
+  ) as HTMLButtonElement | null;
+  if (!compass) {
+    return;
+  }
+  if (compassResetHandler && compassButton) {
+    compassButton.removeEventListener('click', compassResetHandler);
+  }
+  compassResetHandler = () => {
+    map.easeTo({ bearing: 0, pitch: 0, duration: 300 });
+  };
+  compassButton = compass;
+  compassButton.addEventListener('click', compassResetHandler);
 }
 
 const emptyPointCollection: FeatureCollection<Point, Record<string, unknown>> = {
@@ -1188,6 +1207,7 @@ function setupMap() {
   logZoomDebug(mapInstanceLocal);
 
   mapInstanceLocal.addControl(new maplibregl.NavigationControl(), 'top-right');
+  requestAnimationFrame(() => attachCompassReset(mapInstanceLocal));
 
   const geocoder = new MaplibreGeocoder(
     {
@@ -1332,6 +1352,11 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(resizeRaf);
     resizeRaf = 0;
   }
+  if (compassButton && compassResetHandler) {
+    compassButton.removeEventListener('click', compassResetHandler);
+  }
+  compassButton = null;
+  compassResetHandler = null;
   mapInstance.value?.remove();
   window.removeEventListener('keydown', handleKeydown);
   mapContainer.value?.removeEventListener('mousedown', handleBboxMouseDown);

@@ -83,11 +83,22 @@
         :disabled="isIsoActionDisabled"
         @click="toggleIsoPick"
       >
-        {{ ui.isoPickArmed ? '取消生成' : '生成等时圈' }}
+        {{ isoActionLabel }}
+      </button>
+      <button
+        v-if="hasIsoOrigin"
+        type="button"
+        class="button button--ghost"
+        @click="resetIsoOrigin"
+      >
+        重新选择起点
       </button>
       <button type="button" class="button button--ghost" @click="clearIsochrones">
         清除等时圈
       </button>
+      <p v-if="showIsoDirtyHint" class="helper-text">
+        参数已变更，点击生成将更新等时圈
+      </p>
       <p v-if="iso.loading" class="helper-text">正在生成等时圈...</p>
       <p v-else-if="isoEngine.indexing" class="helper-text">
         正在筛选圈内POI/构建索引...
@@ -219,7 +230,26 @@ const { filters, poiEngine, iso, isoEngine, ui, siteEngine } =
 
 const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
 const isOverlayLoading = computed(() => ui.value.overlay?.type === 'loading');
-const isIsoActionDisabled = computed(() => isOverlayLoading.value || iso.value.loading);
+const isIsoActionDisabled = computed(() => {
+  if (isOverlayLoading.value || iso.value.loading) {
+    return true;
+  }
+  if (ui.value.isoPickArmed) {
+    return false;
+  }
+  return Boolean(iso.value.active && !iso.value.dirty);
+});
+const hasIsoOrigin = computed(() => Boolean(iso.value.origin));
+const showIsoDirtyHint = computed(() => Boolean(iso.value.origin && iso.value.dirty));
+const isoActionLabel = computed(() => {
+  if (ui.value.isoPickArmed) {
+    return '取消生成';
+  }
+  if (iso.value.origin) {
+    return iso.value.dirty ? '更新等时圈' : '生成等时圈';
+  }
+  return '生成等时圈';
+});
 
 const selectedGroups = computed({
   get: () => poiEngine.value.selectedGroups,
@@ -393,11 +423,20 @@ function toggleIsoPick() {
     store.cancelIsoPick();
     return;
   }
+  if (iso.value.origin) {
+    store.generateIsochrones();
+    return;
+  }
   store.armIsoPick();
 }
 
 function clearIsochrones() {
   store.clearIsochrones();
+}
+
+function resetIsoOrigin() {
+  store.clearIsochrones();
+  store.armIsoPick();
 }
 
 function exportPoiCsv() {

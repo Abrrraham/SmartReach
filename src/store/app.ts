@@ -41,6 +41,8 @@ interface IsochroneState {
   origin?: { lng: number; lat: number };
   profile: TravelProfile;
   rangesMin: number[];
+  active: boolean;
+  dirty: boolean;
   loading: boolean;
   error?: string;
   isFallback: boolean;
@@ -71,11 +73,13 @@ interface UiState {
   bboxPickArmed: boolean;
   mapHint: string | null;
   overlay: OverlayState | null;
+  poiBlockingLoadingVisible: boolean;
   rightTab: 'iso' | 'site';
   rightTabLocked: boolean;
 }
 
 interface PoiEngineState {
+  prefetchStarted: boolean;
   loadingPois: boolean;
   buildingIndex: boolean;
   queryLoading: boolean;
@@ -208,6 +212,8 @@ export const useAppStore = defineStore('app', () => {
     origin: undefined,
     profile: 'foot-walking',
     rangesMin: [5, 10, 15],
+    active: false,
+    dirty: false,
     loading: false,
     error: undefined,
     isFallback: false,
@@ -238,11 +244,13 @@ export const useAppStore = defineStore('app', () => {
     bboxPickArmed: false,
     mapHint: null,
     overlay: null,
+    poiBlockingLoadingVisible: false,
     rightTab: 'iso',
     rightTabLocked: false
   });
 
   const poiEngine = ref<PoiEngineState>({
+    prefetchStarted: false,
     loadingPois: false,
     buildingIndex: false,
     queryLoading: false,
@@ -419,6 +427,9 @@ export const useAppStore = defineStore('app', () => {
     return `${year}${month}${day}`;
   };
   const sanitizeFileName = (value: string) => value.replace(/[\\/:*?"<>|]/g, '-');
+  const POI_LOADING_MESSAGE = '正在加载 POI 数据...';
+  let poiLoadingOverlayActive = false;
+  let poiReadyPromise: Promise<void> | null = null;
   let poiWorker: Worker | null = null;
   let lastRequestId = 0;
   let expandRequestId = 0;
@@ -527,6 +538,26 @@ export const useAppStore = defineStore('app', () => {
 
   function hideOverlay() {
     ui.value.overlay = null;
+  }
+
+  function showPoiLoadingOverlay() {
+    if (poiLoadingOverlayActive) {
+      return;
+    }
+    ui.value.poiBlockingLoadingVisible = true;
+    showLoading(POI_LOADING_MESSAGE);
+    poiLoadingOverlayActive = true;
+  }
+
+  function hidePoiLoadingOverlay() {
+    if (!poiLoadingOverlayActive) {
+      return;
+    }
+    if (ui.value.overlay?.type === 'loading' && ui.value.overlay.message === POI_LOADING_MESSAGE) {
+      hideOverlay();
+    }
+    ui.value.poiBlockingLoadingVisible = false;
+    poiLoadingOverlayActive = false;
   }
 
   function armIsoPick() {
@@ -853,17 +884,23 @@ export const useAppStore = defineStore('app', () => {
     ui.value.isoListPage += 1;
   }
 
-  function initPoiEngine() {
+  function initPoiEngine(options: { showOverlay?: boolean } = {}) {
     if (poiWorker) {
+      if (options.showOverlay && !poiEngine.value.ready) {
+        showPoiLoadingOverlay();
+      }
       return;
     }
+    poiEngine.value.prefetchStarted = true;
     poiEngine.value.loadingPois = true;
     poiEngine.value.buildingIndex = false;
     poiEngine.value.queryLoading = false;
     poiEngine.value.error = undefined;
     poiEngine.value.indexReady = false;
     poiEngine.value.initialRendered = false;
-    showLoading('正在加载 POI 数据...');
+    if (options.showOverlay) {
+      showPoiLoadingOverlay();
+    }
 
     poiWorker = new Worker(new URL('../workers/poi.worker.ts', import.meta.url), {
       type: 'module'
@@ -889,7 +926,7 @@ export const useAppStore = defineStore('app', () => {
         poiEngine.value.indexReady = false;
         poiEngine.value.poiByGroup = {};
         poiEngine.value.hullByGroup = {};
-        hideOverlay();
+        hidePoiLoadingOverlay();
         logPoi('init_done', {
           groups: Object.keys(poiEngine.value.typeCounts).length,
           total: payload.total ?? 0
@@ -900,7 +937,7 @@ export const useAppStore = defineStore('app', () => {
         poiEngine.value.buildingIndex = false;
         poiEngine.value.indexReady = true;
         poiEngine.value.queryLoading = false;
-        hideOverlay();
+        hidePoiLoadingOverlay();
         logPoi('index_ready', {
           groups: payload?.groups ?? poiEngine.value.selectedGroups
         });
@@ -1067,7 +1104,11 @@ export const useAppStore = defineStore('app', () => {
         pendingExpand.clear();
         poiEngine.value.error = message;
         isoEngine.value.indexing = false;
-        showError('POI 引擎错误', poiEngine.value.error);
+        if (poiLoadingOverlayActive) {
+          showError('POI 引擎错误', poiEngine.value.error);
+          poiLoadingOverlayActive = false;
+          ui.value.poiBlockingLoadingVisible = false;
+        }
       }
     };
 
@@ -1082,6 +1123,46 @@ export const useAppStore = defineStore('app', () => {
         }
       }
     });
+  }
+
+  function prefetchPoisSilently() {
+    if (poiEngine.value.prefetchStarted || poiEngine.value.ready) {
+      return;
+    }
+    logPoi('prefetch_start');
+    initPoiEngine({ showOverlay: false });
+  }
+
+  function ensurePoisReadyForWorkbench(): Promise<void> {
+    if (poiEngine.value.ready) {
+      return Promise.resolve();
+    }
+    initPoiEngine({ showOverlay: true });
+    if (poiReadyPromise) {
+      return poiReadyPromise;
+    }
+    poiReadyPromise = new Promise((resolve) => {
+      const stop = watch(
+        () => [poiEngine.value.ready, poiEngine.value.error],
+        ([ready, error]) => {
+          if (!ready && !error) {
+            return;
+          }
+          if (error) {
+            ui.value.poiBlockingLoadingVisible = false;
+            poiLoadingOverlayActive = false;
+            showError('POI 引擎错误', error);
+          } else {
+            hidePoiLoadingOverlay();
+          }
+          stop();
+          poiReadyPromise = null;
+          resolve();
+        },
+        { immediate: true }
+      );
+    });
+    return poiReadyPromise;
   }
 
   function setMapReady(ready: boolean) {
@@ -1130,7 +1211,6 @@ export const useAppStore = defineStore('app', () => {
     poiEngine.value.indexReady = false;
     if (poiWorker && poiEngine.value.ready) {
       poiEngine.value.buildingIndex = true;
-      showLoading('正在构建 POI 索引...');
       const groupsPlain = toPlainGroups(unique);
       poiWorker.postMessage({
         type: 'BUILD_INDEX',
@@ -1293,12 +1373,18 @@ export const useAppStore = defineStore('app', () => {
   function setTravelMode(mode: TravelProfile) {
     filters.value.travelMode = mode;
     iso.value.profile = mode;
+    if (iso.value.origin && (isoEngine.value.active || iso.value.active)) {
+      iso.value.dirty = true;
+    }
     abortIsochroneRequest();
   }
 
   function setTravelTimes(times: number[]) {
     filters.value.times = times.sort((a, b) => a - b);
     iso.value.rangesMin = filters.value.times.map((value) => Math.round(value / 60));
+    if (iso.value.origin && (isoEngine.value.active || iso.value.active)) {
+      iso.value.dirty = true;
+    }
     abortIsochroneRequest();
   }
 
@@ -1334,6 +1420,9 @@ export const useAppStore = defineStore('app', () => {
   function setIsoOriginFromMapClick(lng: number, lat: number) {
     iso.value.origin = { lng, lat };
     isoEngine.value.origin = { lng, lat };
+    if (iso.value.active) {
+      iso.value.dirty = true;
+    }
   }
 
   function pickIsoPolygon(
@@ -1507,6 +1596,8 @@ export const useAppStore = defineStore('app', () => {
       iso.value.isFallback = cached.isFallback;
       iso.value.error = cached.error;
       iso.value.loading = false;
+      iso.value.active = true;
+      iso.value.dirty = false;
       analysis.value.isochrone = cached.geojson;
       applyIsochroneFilter();
       activateIsoEngine(cached.geojson, nextOrigin);
@@ -1540,6 +1631,8 @@ export const useAppStore = defineStore('app', () => {
       iso.value.geojson = gcjGeojson;
       iso.value.isFallback = result.isFallback;
       iso.value.loading = false;
+      iso.value.active = true;
+      iso.value.dirty = false;
       analysis.value.isochrone = gcjGeojson;
       applyIsochroneFilter();
       activateIsoEngine(gcjGeojson, nextOrigin);
@@ -1809,10 +1902,13 @@ export const useAppStore = defineStore('app', () => {
 
   function clearIsochrones() {
     abortIsochroneRequest();
+    iso.value.origin = undefined;
     iso.value.geojson = undefined;
     iso.value.loading = false;
     iso.value.error = undefined;
     iso.value.isFallback = false;
+    iso.value.active = false;
+    iso.value.dirty = false;
     analysis.value.isochrone = undefined;
     data.value.poisInIsochrone = [];
     isoEngine.value.active = false;
@@ -1860,6 +1956,8 @@ export const useAppStore = defineStore('app', () => {
     activeIsoPoisPaged,
     topCandidates,
     initPoiEngine,
+    prefetchPoisSilently,
+    ensurePoisReadyForWorkbench,
     showLoading,
     showError,
     showInfo,

@@ -18,7 +18,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import { storeToRefs } from 'pinia';
 import { saveAs } from 'file-saver';
 import HeaderBar from '../components/HeaderBar.vue';
@@ -32,6 +32,10 @@ const mapViewRef = ref<InstanceType<typeof MapView> | null>(null);
 
 const store = useAppStore();
 const { data, filters, visiblePoisInIsochrone } = storeToRefs(store);
+
+onMounted(() => {
+  store.ensurePoisReadyForWorkbench();
+});
 
 function handlePoiClick(poi: POI) {
   store.planRouteToPoi(poi);

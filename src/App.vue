@@ -15,6 +15,6 @@ const store = useAppStore();
 const { ui } = storeToRefs(store);
 
 onMounted(() => {
-  store.initPoiEngine();
+  store.prefetchPoisSilently();
 });
 </script>
