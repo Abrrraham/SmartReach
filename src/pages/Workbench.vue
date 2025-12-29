@@ -19,6 +19,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import { DEFAULT_CITY } from '../config/env';
 import { storeToRefs } from 'pinia';
 import { saveAs } from 'file-saver';
 import HeaderBar from '../components/HeaderBar.vue';
@@ -98,7 +99,7 @@ async function exportMapPng() {
   const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
     now.getDate()
   ).padStart(2, '0')}`;
-  const city = (import.meta.env.VITE_DEFAULT_CITY as string | undefined) || '南京市';
+  const city = DEFAULT_CITY;
   saveAs(blob, `${city}-map-${date}.png`);
 }
 

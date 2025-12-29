@@ -14,13 +14,24 @@ import {
 import {
   convertCoord,
   gcj02ToWgs84,
-  normalizeCoordSys,
   transformGeoJSON,
   transformGeoJSONCoordinates,
-  wgs84ToGcj02,
-  type CoordSys
+  wgs84ToGcj02
 } from '../utils/coord';
 import { GROUP_COLORS, GROUP_LABELS, GROUP_ORDER } from '../utils/poiGroups';
+import {
+  AMAP_KEY,
+  BASE_URL,
+  DEFAULT_CENTER,
+  DEFAULT_ZOOM,
+  DEBUG_ACCESS,
+  IS_DEV,
+  MAP_COORD_SYS,
+  MAP_STYLE_URL,
+  POI_COORD_SYS,
+  POI_URL,
+  RULES_URL
+} from '../config/env';
 import {
   directionsGeojson as fetchDirectionsGeojson,
   isochrones as fetchIsochrones
@@ -194,32 +205,6 @@ interface OverlayState {
   detail?: string;
 }
 
-const POI_URL = (import.meta.env.VITE_POI_URL as string | undefined) ?? '/data/nanjing_poi.json';
-const RULES_URL = '/data/type_rules.generated.json';
-const BASEMAP_PROVIDER = (
-  (import.meta.env.VITE_BASEMAP_PROVIDER as string | undefined) ?? 'amap'
-).toLowerCase();
-const MAP_COORD_SYS: CoordSys = normalizeCoordSys(
-  import.meta.env.VITE_COORD_SYS as string | undefined,
-  BASEMAP_PROVIDER === 'osm' ? 'WGS84' : 'GCJ02'
-);
-const POI_COORD_SYS: CoordSys = normalizeCoordSys(
-  import.meta.env.VITE_POI_COORD_SYS as string | undefined,
-  'WGS84'
-);
-const AMAP_KEY = (import.meta.env.VITE_AMAP_KEY as string | undefined) ?? '';
-
-const DEFAULT_CENTER = (() => {
-  const raw = (import.meta.env.VITE_DEFAULT_CENTER as string | undefined) ?? '118.796,32.060';
-  const [lon, lat] = raw.split(',').map((value) => Number.parseFloat(value.trim()));
-  return [Number.isFinite(lon) ? lon : 118.796, Number.isFinite(lat) ? lat : 32.06] as [
-    number,
-    number
-  ];
-})();
-
-const DEFAULT_ZOOM = Number.parseFloat((import.meta.env.VITE_DEFAULT_ZOOM as string) ?? '11');
-const DEFAULT_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL as string | undefined;
 const ISO_CACHE_TTL_MS = 5 * 60 * 1000;
 const ROUTE_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -230,11 +215,9 @@ const INITIAL_WEIGHTS: SitingWeights = {
   constraint: 1
 };
 
-const ACCESS_DEBUG =
-  import.meta.env.DEV && (import.meta.env.VITE_DEBUG_ACCESS as string | undefined) === '1';
+const ACCESS_DEBUG = DEBUG_ACCESS;
 const ACCESS_WORKER_TIMEOUT_MS = 12 * 1000;
 const ACCESS_POI_WAIT_TIMEOUT_MS = 15 * 1000;
-const BASE_URL = (import.meta.env.BASE_URL as string | undefined) ?? '/';
 const ACCESS_BASELINE_URL = BASE_URL.endsWith('/')
   ? `${BASE_URL}data/nanjing_access_baseline.json`
   : `${BASE_URL}/data/nanjing_access_baseline.json`;
@@ -270,7 +253,7 @@ export const useAppStore = defineStore('app', () => {
   const map = ref<MapState>({
     center: DEFAULT_CENTER,
     zoom: Number.isFinite(DEFAULT_ZOOM) ? DEFAULT_ZOOM : 11,
-    styleUrl: DEFAULT_STYLE_URL ?? undefined
+    styleUrl: MAP_STYLE_URL ?? undefined
   });
 
   const filters = ref<FilterState>({
@@ -458,7 +441,7 @@ export const useAppStore = defineStore('app', () => {
     type: 'FeatureCollection',
     features: []
   };
-  const DEV_LOG = import.meta.env.DEV;
+  const DEV_LOG = IS_DEV;
   const logPoi = (message: string, payload?: Record<string, unknown>) => {
     if (!DEV_LOG) return;
     console.info('[poi-engine]', message, payload ?? {});
@@ -540,7 +523,7 @@ export const useAppStore = defineStore('app', () => {
     console.error('[ACC]', step, detail ?? {}, error ?? '');
   };
   const formatAccessError = (code: string, detail?: string) => {
-    if (import.meta.env.DEV) {
+    if (IS_DEV) {
       return `可达性评估失败（${code}${detail ? `: ${detail}` : ''}）`;
     }
     return '可达性评估失败，请稍后重试';
@@ -2526,7 +2509,7 @@ export const useAppStore = defineStore('app', () => {
           isFallback: result.isFallback
         });
       }
-      if (import.meta.env.DEV) {
+      if (IS_DEV) {
         console.info('[route]', {
           profile,
           start: [startLngW, startLatW],

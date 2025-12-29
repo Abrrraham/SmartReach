@@ -24,31 +24,17 @@ import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
 import { buildAmapRasterStyle } from '../services/style';
 import { GROUP_ALPHA, GROUP_COLORS, GROUP_COLORS_DARK, GROUP_COLORS_LIGHT } from '../utils/poiGroups';
+import {
+  BASEMAP_PROVIDER,
+  HAS_AMAP_KEY,
+  IS_DEV,
+  MAP_STYLE_URL,
+  MAX_ZOOM,
+  MIN_ZOOM
+} from '../config/env';
 import MapHintBar from './MapHintBar.vue';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import '@maplibre/maplibre-gl-geocoder/dist/maplibre-gl-geocoder.css';
-
-const BASEMAP_PROVIDER = (
-  (import.meta.env.VITE_BASEMAP_PROVIDER as string | undefined) ?? 'amap'
-).toLowerCase();
-const ENV_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL as string | undefined;
-const AMAP_KEY = (import.meta.env.VITE_AMAP_KEY as string | undefined) ?? '';
-const HAS_AMAP_KEY = AMAP_KEY.trim().length > 0;
-const MIN_ZOOM_RAW = Number.parseFloat(
-  (import.meta.env.VITE_MIN_ZOOM as string | undefined) ?? '3'
-);
-const MAX_ZOOM_RAW = Number.parseFloat(
-  (import.meta.env.VITE_MAX_ZOOM as string | undefined) ?? '18'
-);
-const MIN_ZOOM_CAP = 7;
-const MIN_ZOOM_DEFAULT = 3;
-const MAX_ZOOM_DEFAULT = 18;
-const MIN_ZOOM = Number.isFinite(MIN_ZOOM_RAW)
-  ? Math.max(0, Math.min(MIN_ZOOM_RAW, MIN_ZOOM_CAP))
-  : MIN_ZOOM_DEFAULT;
-const MAX_ZOOM = Number.isFinite(MAX_ZOOM_RAW)
-  ? Math.max(MAX_ZOOM_RAW, MAX_ZOOM_DEFAULT)
-  : MAX_ZOOM_DEFAULT;
 
 const OSM_STYLE: maplibregl.StyleSpecification = {
   version: 8,
@@ -438,7 +424,7 @@ function logBasemapConfig() {
       : 'amap_default';
   console.info('[map] basemap config', {
     provider: BASEMAP_PROVIDER,
-    envStyleUrl: ENV_STYLE_URL ?? '(empty)',
+    envStyleUrl: MAP_STYLE_URL ?? '(empty)',
     hasAmapKey: HAS_AMAP_KEY,
     styleSource
   });
@@ -448,7 +434,7 @@ function logBasemapConfig() {
 }
 
 function logZoomDebug(map: MaplibreMap) {
-  if (!import.meta.env.DEV) return;
+  if (!IS_DEV) return;
   console.info('[map] zoom debug', {
     zoom: map.getZoom(),
     minZoom: map.getMinZoom(),
@@ -504,7 +490,7 @@ const emptySiteBboxCollection: FeatureCollection<Polygon, Record<string, unknown
   features: []
 };
 const activeGroups = new Set<string>();
-const DEV_LOG = import.meta.env.DEV;
+const DEV_LOG = IS_DEV;
 const logPoiLayer = (message: string, payload?: Record<string, unknown>) => {
   if (!DEV_LOG) return;
   console.info('[poi-layer]', message, payload ?? {});

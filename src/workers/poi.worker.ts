@@ -1,6 +1,7 @@
 import Supercluster from 'supercluster';
 import type { Feature, FeatureCollection, Point, Polygon, MultiPolygon } from 'geojson';
 import { convertCoord, normalizeCoordSys, type CoordSys } from '../utils/coord';
+import { IS_DEV } from '../config/env';
 import { booleanPointInPolygon, convex, featureCollection, point as turfPoint } from '@turf/turf';
 
 interface GroupRule {
@@ -141,7 +142,7 @@ const HULL_MAX_ZOOM = 12;
 const HULL_MIN_COUNT = 30;
 const HULL_MAX_LEAVES = 300;
 
-const DEV_LOG = import.meta.env.DEV;
+const DEV_LOG = IS_DEV;
 const logWorker = (message: string, payload?: Record<string, unknown>) => {
   if (!DEV_LOG) return;
   console.info('[poi-worker]', message, payload ?? {});

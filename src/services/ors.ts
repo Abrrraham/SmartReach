@@ -2,6 +2,7 @@ import axios from 'axios';
 import { buffer, lineString, point, featureCollection, distance as turfDistance } from '@turf/turf';
 import type { Feature, FeatureCollection, LineString, MultiLineString, MultiPolygon, Polygon } from 'geojson';
 import type { TravelProfile } from '../utils/spatial';
+import { ORS_KEY } from '../config/env';
 
 interface IsochroneParams {
   lon: number;
@@ -64,8 +65,8 @@ const SPEED_LUT: Record<TravelProfile, number> = {
   'driving-car': 40
 };
 
-const orsKey = import.meta.env.VITE_ORS_KEY;
-const hasApiKey = Boolean(orsKey && orsKey.trim().length > 0);
+const ORS_KEY_VALUE = ORS_KEY.trim();
+const hasApiKey = ORS_KEY_VALUE.length > 0;
 
 function isAbortError(error: unknown): boolean {
   if (axios.isCancel?.(error)) {
@@ -101,7 +102,7 @@ export async function isochrones(params: IsochroneParams): Promise<IsochroneResu
       },
       {
         headers: {
-          Authorization: orsKey,
+          Authorization: ORS_KEY_VALUE,
           'Content-Type': 'application/json; charset=utf-8',
           Accept: 'application/geo+json, application/json'
         },
@@ -156,7 +157,7 @@ export async function directions(params: DirectionsParams): Promise<Feature<Line
       },
       {
         headers: {
-          Authorization: orsKey,
+          Authorization: ORS_KEY_VALUE,
           'Content-Type': 'application/json'
         }
       }
@@ -195,7 +196,7 @@ export async function directionsGeojson(params: DirectionsParams): Promise<Direc
       },
       {
         headers: {
-          Authorization: orsKey,
+          Authorization: ORS_KEY_VALUE,
           'Content-Type': 'application/json; charset=utf-8',
           Accept: 'application/json, application/geo+json'
         },
@@ -267,7 +268,7 @@ export async function matrix(params: MatrixParams): Promise<MatrixResponseShape>
       },
       {
         headers: {
-          Authorization: orsKey,
+          Authorization: ORS_KEY,
           'Content-Type': 'application/json'
         }
       }

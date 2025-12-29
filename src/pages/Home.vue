@@ -34,10 +34,11 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { APP_NAME, DEFAULT_CITY } from '../config/env';
 import HeaderBar from '../components/HeaderBar.vue';
 
-const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
-const defaultCity = computed(() => (import.meta.env.VITE_DEFAULT_CITY as string) ?? '南京市');
+const appName = computed(() => APP_NAME);
+const defaultCity = computed(() => DEFAULT_CITY);
 
 const features = [
   {

@@ -4,6 +4,7 @@ node_modules/.vite/
 node_modules/.vue-global-types/
 .vite/
 .cache/
+cache/
 .npm_cache/
 coverage/
 *.log
@@ -11,3 +12,5 @@ coverage/
 .env.*.local
 /.DS_Store
 public/data/nanjing_poi.*
+public/data/nanjing_access_baseline.report.json
+public/data/type_coverage_report.md

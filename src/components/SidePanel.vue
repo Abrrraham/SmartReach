@@ -217,6 +217,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { APP_NAME } from '../config/env';
 import { storeToRefs } from 'pinia';
 import { useAppStore } from '../store/app';
 import { GROUP_COLORS, GROUP_LABELS, GROUP_ORDER } from '../utils/poiGroups';
@@ -253,7 +254,7 @@ const { filters, poiEngine, iso, isoEngine, ui, siteEngine, accessibility } =
   storeToRefs(store);
 
 
-const appName = computed(() => (import.meta.env.VITE_APP_NAME as string) ?? 'SmartReach');
+const appName = computed(() => APP_NAME);
 const isOverlayLoading = computed(() => ui.value.overlay?.type === 'loading');
 const isIsoActionDisabled = computed(() => {
   if (isOverlayLoading.value || iso.value.loading) {

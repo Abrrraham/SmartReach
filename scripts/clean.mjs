@@ -15,12 +15,12 @@ if (wantsHelp) {
 
 const root = process.cwd();
 const cacheTargets = [
-  '.cache/vite',
+  '.cache',
   'node_modules/.vite',
   '.vite',
   'dist'
 ];
-const allTargets = useAll ? [...cacheTargets, 'node_modules'] : cacheTargets;
+const allTargets = useAll ? [...cacheTargets, 'node_modules', 'cache'] : cacheTargets;
 
 function removePath(relativePath) {
   const target = path.resolve(root, relativePath);
