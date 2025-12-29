@@ -799,13 +799,13 @@ function ensureIsochroneLayers(map: MaplibreMap) {
           ['linear'],
           ISO_VALUE_EXPR,
           300,
-          '#7dd3fc',
+          '#1e3a8a',
           600,
-          MAP_COLORS.brand,
+          '#1e40af',
           900,
-          '#0ea5e9'
+          '#1d4ed8'
         ],
-        'fill-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.28, 900, 0.12]
+        'fill-opacity': ['interpolate', ['linear'], ISO_VALUE_EXPR, 300, 0.45, 900, 0.25]
       }
     });
 

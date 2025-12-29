@@ -1548,7 +1548,7 @@ export const useAppStore = defineStore('app', () => {
         ts: Date.now(),
         counts,
         index,
-        cityIndex,
+        cityIndex: cityIndex ?? [],
         rating,
         isFallback: result.isFallback
         });
@@ -1837,11 +1837,11 @@ export const useAppStore = defineStore('app', () => {
         ([ready, error]) => {
           if (!ready && !error) {
             return;
-          }
+          } 
           if (error) {
             ui.value.poiBlockingLoadingVisible = false;
             poiLoadingOverlayActive = false;
-            showError('POI 引擎错误', error);
+            showError('POI 引擎错误', typeof error === 'string' ? error : undefined);
           } else {
             hidePoiLoadingOverlay();
           }

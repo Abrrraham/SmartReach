@@ -1184,7 +1184,7 @@ self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
           }
           let grid = countGrids.get(group);
           if (!grid) {
-            grid = buildCountGrid(points);
+            grid = buildCountGrid(points) ?? undefined;
             if (grid) {
               countGrids.set(group, grid);
             }
