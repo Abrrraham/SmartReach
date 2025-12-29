@@ -1899,13 +1899,13 @@ export const useAppStore = defineStore('app', () => {
         poiEngine.value.lastViewport.zoom
       );
     }
-    if (isoEngine.value.active && isoEngine.value.indexReady) {
+    if (isoEngine.value.active) {
       const addedGroups = unique.filter((group) => !isoIndexedGroups.has(group));
-      if (addedGroups.length) {
+      if (!isoEngine.value.indexReady && !isoEngine.value.indexing) {
+        applyIsochroneToPoi(unique);
+      } else if (addedGroups.length && !isoEngine.value.indexing) {
         applyIsochroneToPoi(addedGroups);
       }
-    }
-    if (isoEngine.value.active) {
       rebuildIsoPoiList();
       ensureActiveIsoGroup();
     }
