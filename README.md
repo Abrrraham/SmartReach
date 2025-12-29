@@ -58,3 +58,13 @@ node scripts/generate_access_baseline.mjs \
 ```
 
 如需直接替换线上基线数据，请将 `--out` 指向 `public/data/nanjing_access_baseline.json`。
+
+## Migration (new machine / new path)
+
+- Recommended: do NOT copy `node_modules` when migrating.
+- On a new machine/path:
+  - `npm ci`
+  - `npm run dev`
+- If you accidentally copied `node_modules`, run `npm run reinstall` to recover.
+- Use `npm run clean` to clear caches; use `npm run reset` for a full reinstall.
+- Node version: use Node.js >= 20 to avoid build/runtime inconsistencies.

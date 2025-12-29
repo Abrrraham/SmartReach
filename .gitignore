@@ -2,5 +2,12 @@ dist/
 node_modules/
 node_modules/.vite/
 node_modules/.vue-global-types/
+.vite/
+.cache/
 .npm_cache/
+coverage/
+*.log
+.env.local
+.env.*.local
+/.DS_Store
 public/data/nanjing_poi.*

@@ -3,9 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "dev": "vite --host",
-    "build": "vue-tsc --noEmit && vite build",
+    "clean": "node scripts/clean.mjs --cache",
+    "reset": "node scripts/clean.mjs --all",
+    "reinstall": "npm run reset && npm ci",
+    "dev": "npm run clean && vite --host",
+    "build": "npm run clean && vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest --watch",
