@@ -198,6 +198,14 @@
       class="result-section"
       :class="{ 'result-section--active': ui.rightTab === 'iso' }"
     >
+      <AccessibilityCard />
+    </section>
+
+    <section
+      v-show="ui.rightTab === 'iso'"
+      class="result-section"
+      :class="{ 'result-section--active': ui.rightTab === 'iso' }"
+    >
       <header class="result-section__header">
         <h3>
           圈内 POI · {{ activeGroupStat?.label ?? '未选择分类' }}（{{ activeGroupStat?.count ?? 0 }} 条）
@@ -237,6 +245,7 @@ import { computed, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import type { POI } from '../types/poi';
 import { useAppStore } from '../store/app';
+import AccessibilityCard from './AccessibilityCard.vue';
 
 const emit = defineEmits<{
   (event: 'navigate', poi: POI): void;

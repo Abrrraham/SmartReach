@@ -73,6 +73,7 @@ const OSM_STYLE: maplibregl.StyleSpecification = {
 const AMAP_STYLE: maplibregl.StyleSpecification = buildAmapRasterStyle();
 const ISOCHRONE_SOURCE_ID = 'isochrones';
 const ISO_ORIGIN_SOURCE_ID = 'iso-origin';
+const ACCESS_ORIGIN_SOURCE_ID = 'access-origin';
 const ROUTE_SOURCE_ID = 'route';
 const ROUTE_ENDPOINT_SOURCE_ID = 'route-endpoint';
 const SITE_BBOX_SOURCE_ID = 'site-bbox';
@@ -141,7 +142,7 @@ const emit = defineEmits<{
 const mapContainer = ref<HTMLDivElement | null>(null);
 const mapInstance = ref<MaplibreMap>();
 const store = useAppStore();
-const { map, nanjingBounds, analysis, poiEngine, isoEngine, route, ui, siteEngine } =
+const { map, nanjingBounds, analysis, poiEngine, isoEngine, route, ui, siteEngine, accessibility } =
   storeToRefs(store);
 const viewportDebounceMs = 120;
 let viewportTimer: number | null = null;
@@ -228,13 +229,20 @@ function updateMapCursor() {
   const map = mapInstance.value;
   if (!map) return;
   map.getCanvas().style.cursor =
-    ui.value.isoPickArmed || ui.value.bboxPickArmed ? 'crosshair' : '';
+    ui.value.isoPickArmed || ui.value.bboxPickArmed || ui.value.accessPickArmed
+      ? 'crosshair'
+      : '';
 }
 
 function handleIsoPick(coordinates: [number, number]) {
   store.setIsoOriginFromMapClick(coordinates[0], coordinates[1]);
   store.generateIsochrones(coordinates);
   store.cancelIsoPick();
+}
+
+function handleAccessibilityPick(coordinates: [number, number]) {
+  store.evaluateAccessibilityAtOrigin({ lng: coordinates[0], lat: coordinates[1] });
+  store.cancelAccessibilityPick();
 }
 
 function handleMapHintCancel() {
@@ -245,6 +253,10 @@ function handleMapHintCancel() {
   }
   if (ui.value.isoPickArmed) {
     store.cancelIsoPick();
+    return;
+  }
+  if (ui.value.accessPickArmed) {
+    store.cancelAccessibilityPick();
   }
 }
 
@@ -291,6 +303,10 @@ function handleKeydown(event: KeyboardEvent) {
     }
     if (ui.value.isoPickArmed) {
       store.cancelIsoPick();
+      return;
+    }
+    if (ui.value.accessPickArmed) {
+      store.cancelAccessibilityPick();
     }
   }
 }
@@ -653,7 +669,7 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
   }
 
   const clusterHandler = async (event: maplibregl.MapLayerMouseEvent) => {
-    if (ui.value.isoPickArmed || ui.value.bboxPickArmed) {
+    if (ui.value.isoPickArmed || ui.value.bboxPickArmed || ui.value.accessPickArmed) {
       return;
     }
     if (!event.features?.length) return;
@@ -677,7 +693,7 @@ function ensureGroupLayers(map: MaplibreMap, group: string, includeHull: boolean
     });
   };
   const pointHandler = (event: maplibregl.MapLayerMouseEvent) => {
-    if (ui.value.isoPickArmed || ui.value.bboxPickArmed) {
+    if (ui.value.isoPickArmed || ui.value.bboxPickArmed || ui.value.accessPickArmed) {
       return;
     }
     if (!event.features?.length) return;
@@ -849,6 +865,56 @@ function ensureIsoOriginLayers(map: MaplibreMap) {
       },
       paint: {
         'text-color': MAP_COLORS.brand,
+        'text-halo-color': 'rgba(6, 10, 20, 0.75)',
+        'text-halo-width': 1.2
+      }
+    });
+  }
+}
+
+function ensureAccessOriginLayers(map: MaplibreMap) {
+  if (!map.getSource(ACCESS_ORIGIN_SOURCE_ID)) {
+    map.addSource(ACCESS_ORIGIN_SOURCE_ID, {
+      type: 'geojson',
+      data: emptyOriginCollection
+    });
+
+    map.addLayer({
+      id: 'access-origin-halo',
+      type: 'circle',
+      source: ACCESS_ORIGIN_SOURCE_ID,
+      paint: {
+        'circle-radius': 12,
+        'circle-color': MAP_COLORS.accent,
+        'circle-opacity': 0.18
+      }
+    });
+
+    map.addLayer({
+      id: 'access-origin-point',
+      type: 'circle',
+      source: ACCESS_ORIGIN_SOURCE_ID,
+      paint: {
+        'circle-radius': 7,
+        'circle-color': MAP_COLORS.accent,
+        'circle-stroke-width': 2,
+        'circle-stroke-color': MAP_COLORS.neutralStroke,
+        'circle-stroke-opacity': 0.85
+      }
+    });
+
+    map.addLayer({
+      id: 'access-origin-label',
+      type: 'symbol',
+      source: ACCESS_ORIGIN_SOURCE_ID,
+      layout: {
+        'text-field': ['get', 'label'],
+        'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+        'text-size': 12,
+        'text-offset': [0, 1.2]
+      },
+      paint: {
+        'text-color': MAP_COLORS.accent,
         'text-halo-color': 'rgba(6, 10, 20, 0.75)',
         'text-halo-width': 1.2
       }
@@ -1150,6 +1216,36 @@ function setIsoOrigin(origin?: { lng: number; lat: number }, active?: boolean) {
   }
 }
 
+function setAccessOrigin(origin?: { lng: number; lat: number }, active?: boolean) {
+  const map = mapInstance.value;
+  if (!map) return;
+  ensureAccessOriginLayers(map);
+
+  const source = map.getSource(ACCESS_ORIGIN_SOURCE_ID) as GeoJSONSource | undefined;
+  if (!source) {
+    return;
+  }
+  if (active && origin) {
+    source.setData({
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          geometry: {
+            type: 'Point',
+            coordinates: [origin.lng, origin.lat]
+          },
+          properties: {
+            label: '评估点'
+          }
+        }
+      ]
+    } as FeatureCollection<Point, Record<string, unknown>>);
+  } else {
+    source.setData(emptyOriginCollection);
+  }
+}
+
 function setRoute(geojson?: FeatureCollection) {
   const map = mapInstance.value;
   if (!map) return;
@@ -1257,6 +1353,7 @@ function setupMap() {
   mapInstanceLocal.on('load', () => {
     ensureIsochroneLayers(mapInstanceLocal);
     ensureIsoOriginLayers(mapInstanceLocal);
+    ensureAccessOriginLayers(mapInstanceLocal);
     ensureRouteLayer(mapInstanceLocal);
     ensureSiteBboxLayers(mapInstanceLocal);
     ensureSiteResultLayers(mapInstanceLocal);
@@ -1272,6 +1369,9 @@ function setupMap() {
     }
     if (isoEngine.value.active) {
       setIsoOrigin(isoEngine.value.origin, isoEngine.value.active);
+    }
+    if (accessibility.value.active) {
+      setAccessOrigin(accessibility.value.origin, accessibility.value.active);
     }
     if (route.value.geojson) {
       setRoute(route.value.geojson);
@@ -1293,11 +1393,15 @@ function setupMap() {
       handleIsoPick([event.lngLat.lng, event.lngLat.lat]);
       return;
     }
+    if (ui.value.accessPickArmed) {
+      handleAccessibilityPick([event.lngLat.lng, event.lngLat.lat]);
+      return;
+    }
     emit('map-click', [event.lngLat.lng, event.lngLat.lat]);
   });
 
   mapInstanceLocal.on('click', SITE_RESULT_POINT_ID, (event) => {
-    if (ui.value.bboxPickArmed || ui.value.isoPickArmed) {
+    if (ui.value.bboxPickArmed || ui.value.isoPickArmed || ui.value.accessPickArmed) {
       return;
     }
     const feature = event.features?.[0];
@@ -1308,7 +1412,7 @@ function setupMap() {
   });
 
   mapInstanceLocal.on('click', SITE_RESULT_LABEL_ID, (event) => {
-    if (ui.value.bboxPickArmed || ui.value.isoPickArmed) {
+    if (ui.value.bboxPickArmed || ui.value.isoPickArmed || ui.value.accessPickArmed) {
       return;
     }
     const feature = event.features?.[0];
@@ -1375,6 +1479,7 @@ onBeforeUnmount(() => {
         syncGroupLayers(map);
         ensureIsochroneLayers(map);
         ensureIsoOriginLayers(map);
+        ensureAccessOriginLayers(map);
         ensureRouteLayer(map);
         ensureSiteBboxLayers(map);
         ensureSiteResultLayers(map);
@@ -1385,6 +1490,9 @@ onBeforeUnmount(() => {
         }
         if (isoEngine.value.active) {
           setIsoOrigin(isoEngine.value.origin, isoEngine.value.active);
+        }
+        if (accessibility.value.active) {
+          setAccessOrigin(accessibility.value.origin, accessibility.value.active);
         }
         if (route.value.geojson) {
           setRoute(route.value.geojson);
@@ -1445,7 +1553,7 @@ onBeforeUnmount(() => {
   );
 
   watch(
-    () => [ui.value.isoPickArmed, ui.value.bboxPickArmed],
+    () => [ui.value.isoPickArmed, ui.value.bboxPickArmed, ui.value.accessPickArmed],
     () => {
       updateMapCursor();
       const map = mapInstance.value;
@@ -1480,6 +1588,13 @@ watch(
   () => [isoEngine.value.active, isoEngine.value.origin?.lng, isoEngine.value.origin?.lat],
   () => {
     setIsoOrigin(isoEngine.value.origin, isoEngine.value.active);
+  }
+);
+
+watch(
+  () => [accessibility.value.active, accessibility.value.origin?.lng, accessibility.value.origin?.lat],
+  () => {
+    setAccessOrigin(accessibility.value.origin, accessibility.value.active);
   }
 );
 

@@ -108,6 +108,31 @@
         当前为近似圆（未配置 ORS Key 或服务不可用）
       </p>
 
+      <h3>可达性评价</h3>
+      <button
+        type="button"
+        class="button button--secondary"
+        :disabled="isAccessActionDisabled"
+        @click="runAccessibility"
+      >
+        {{ accessibilityLabel }}
+      </button>
+      <button
+        v-if="accessibility.active"
+        type="button"
+        class="button button--ghost"
+        @click="clearAccessibility"
+      >
+        清除评价
+      </button>
+      <p v-if="accessibility.loading" class="helper-text">正在评估可达性...</p>
+      <p v-else-if="accessibility.error" class="helper-text helper-text--warn">
+        {{ accessibility.error }}
+      </p>
+      <p v-else-if="accessibility.active && accessibility.dirty" class="helper-text">
+        参数变化，需重新评估
+      </p>
+
       <h3>智能选址</h3>
       <label class="form-label" for="site-group-select">商铺类型</label>
       <select
@@ -224,7 +249,7 @@ const selectedTimes = ref<number[]>([300, 600, 900]);
 const travelMode = ref<'foot-walking' | 'cycling-regular' | 'driving-car'>('foot-walking');
 
 const store = useAppStore();
-const { filters, poiEngine, iso, isoEngine, ui, siteEngine } =
+const { filters, poiEngine, iso, isoEngine, ui, siteEngine, accessibility } =
   storeToRefs(store);
 
 
@@ -238,6 +263,16 @@ const isIsoActionDisabled = computed(() => {
     return false;
   }
   return Boolean(iso.value.active && !iso.value.dirty);
+});
+const isAccessActionDisabled = computed(() => accessibility.value.loading);
+const accessibilityLabel = computed(() => {
+  if (ui.value.accessPickArmed) {
+    return '取消选择评估点';
+  }
+  if (accessibility.value.active && accessibility.value.dirty) {
+    return '重新评估可达性';
+  }
+  return '生成可达性评价';
 });
 const hasIsoOrigin = computed(() => Boolean(iso.value.origin));
 const showIsoDirtyHint = computed(() => Boolean(iso.value.origin && iso.value.dirty));
@@ -437,6 +472,26 @@ function clearIsochrones() {
 function resetIsoOrigin() {
   store.clearIsochrones();
   store.armIsoPick();
+}
+
+function runAccessibility() {
+  if (ui.value.accessPickArmed) {
+    store.cancelAccessibilityPick();
+    return;
+  }
+  if (iso.value.origin) {
+    store.evaluateAccessibilityAtOrigin(iso.value.origin, filters.value.travelMode);
+    return;
+  }
+  if (accessibility.value.origin) {
+    store.evaluateAccessibilityAtOrigin(accessibility.value.origin, filters.value.travelMode);
+    return;
+  }
+  store.armAccessibilityPick();
+}
+
+function clearAccessibility() {
+  store.clearAccessibility();
 }
 
 function exportPoiCsv() {

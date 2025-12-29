@@ -1,0 +1,366 @@
+{
+  "version": 1,
+  "city": "南京市",
+  "generatedAt": "2025-12-29T01:34:10.101Z",
+  "poiSource": "nanjing_poi.json (572951)",
+  "profile": "foot-walking",
+  "thresholdsMin": [
+    1,
+    15,
+    30,
+    45,
+    60
+  ],
+  "coreGroups": [
+    "shopping",
+    "transport",
+    "medical",
+    "education_culture",
+    "entertainment_sports",
+    "public_facility"
+  ],
+  "sample": {
+    "seed": 42,
+    "nRequested": 250,
+    "nUsed": 250,
+    "nFailed": 0,
+    "strategy": "stratified-grid-from-poi"
+  },
+  "categoryMean": {
+    "shopping": [
+      5,
+      92,
+      267,
+      495,
+      780
+    ],
+    "transport": [
+      1,
+      32,
+      111,
+      216,
+      355
+    ],
+    "medical": [
+      0,
+      9,
+      31,
+      58,
+      91
+    ],
+    "education_culture": [
+      0,
+      15,
+      53,
+      100,
+      158
+    ],
+    "entertainment_sports": [
+      0,
+      9,
+      30,
+      56,
+      88
+    ],
+    "public_facility": [
+      0,
+      7,
+      21,
+      40,
+      63
+    ]
+  },
+  "indexMean": [
+    0.302,
+    0.473,
+    0.534,
+    0.592,
+    0.642
+  ],
+  "ratingBreaks": {
+    "p20": 0.1,
+    "p40": 0.238,
+    "p60": 0.406,
+    "p80": 0.865
+  },
+  "debug": {
+    "bbox": [
+      118.36027451522598,
+      31.2317754765004,
+      119.22712776077523,
+      32.61068898149833
+    ],
+    "notes": "coordSysPoi=gcj02, gridKm=5, cellKm=1, rps=1, retry=5"
+  },
+  "byProfile": {
+    "foot-walking": {
+      "version": 1,
+      "city": "南京市",
+      "generatedAt": "2025-12-29T01:08:43.530Z",
+      "poiSource": "nanjing_poi.json (572951)",
+      "profile": "foot-walking",
+      "thresholdsMin": [
+        1,
+        15,
+        30,
+        45,
+        60
+      ],
+      "coreGroups": [
+        "shopping",
+        "transport",
+        "medical",
+        "education_culture",
+        "entertainment_sports",
+        "public_facility"
+      ],
+      "sample": {
+        "seed": 42,
+        "nRequested": 250,
+        "nUsed": 250,
+        "nFailed": 0,
+        "strategy": "stratified-grid-from-poi"
+      },
+      "categoryMean": {
+        "shopping": [
+          5,
+          92,
+          267,
+          495,
+          780
+        ],
+        "transport": [
+          1,
+          32,
+          111,
+          216,
+          355
+        ],
+        "medical": [
+          0,
+          9,
+          31,
+          58,
+          91
+        ],
+        "education_culture": [
+          0,
+          15,
+          53,
+          100,
+          158
+        ],
+        "entertainment_sports": [
+          0,
+          9,
+          30,
+          56,
+          88
+        ],
+        "public_facility": [
+          0,
+          7,
+          21,
+          40,
+          63
+        ]
+      },
+      "indexMean": [
+        0.302,
+        0.473,
+        0.534,
+        0.592,
+        0.642
+      ],
+      "ratingBreaks": {
+        "p20": 0.1,
+        "p40": 0.238,
+        "p60": 0.406,
+        "p80": 0.865
+      },
+      "debug": {
+        "bbox": [
+          118.36027451522598,
+          31.2317754765004,
+          119.22712776077523,
+          32.61068898149833
+        ],
+        "notes": "coordSysPoi=gcj02, gridKm=5, cellKm=1, rps=1, retry=5"
+      }
+    },
+    "cycling-regular": {
+      "version": 1,
+      "city": "南京市",
+      "generatedAt": "2025-12-29T01:25:06.722Z",
+      "poiSource": "nanjing_poi.json (572951)",
+      "profile": "cycling-regular",
+      "thresholdsMin": [
+        1,
+        15,
+        30,
+        45,
+        60
+      ],
+      "coreGroups": [
+        "shopping",
+        "transport",
+        "medical",
+        "education_culture",
+        "entertainment_sports",
+        "public_facility"
+      ],
+      "sample": {
+        "seed": 42,
+        "nRequested": 250,
+        "nUsed": 250,
+        "nFailed": 0,
+        "strategy": "stratified-grid-from-poi"
+      },
+      "categoryMean": {
+        "shopping": [
+          5,
+          548,
+          1736,
+          3824,
+          6578
+        ],
+        "transport": [
+          2,
+          239,
+          821,
+          1822,
+          3172
+        ],
+        "medical": [
+          1,
+          65,
+          194,
+          428,
+          733
+        ],
+        "education_culture": [
+          1,
+          110,
+          348,
+          769,
+          1324
+        ],
+        "entertainment_sports": [
+          0,
+          64,
+          198,
+          447,
+          769
+        ],
+        "public_facility": [
+          1,
+          48,
+          149,
+          323,
+          554
+        ]
+      },
+      "indexMean": [
+        0.241,
+        0.569,
+        0.722,
+        0.796,
+        0.844
+      ],
+      "ratingBreaks": {
+        "p20": 0.192,
+        "p40": 0.41,
+        "p60": 0.605,
+        "p80": 0.928
+      },
+      "debug": {
+        "bbox": [
+          118.36027451522598,
+          31.2317754765004,
+          119.22712776077523,
+          32.61068898149833
+        ],
+        "notes": "coordSysPoi=gcj02, gridKm=5, cellKm=1, rps=1, retry=5"
+      }
+    },
+    "driving-car": {
+      "version": 1,
+      "city": "南京市",
+      "generatedAt": "2025-12-29T01:34:10.101Z",
+      "poiSource": "nanjing_poi.json (572951)",
+      "profile": "driving-car",
+      "thresholdsMin": [
+        1,
+        15,
+        30
+      ],
+      "coreGroups": [
+        "shopping",
+        "transport",
+        "medical",
+        "education_culture",
+        "entertainment_sports",
+        "public_facility"
+      ],
+      "sample": {
+        "seed": 42,
+        "nRequested": 199,
+        "nUsed": 199,
+        "nFailed": 0,
+        "strategy": "cache-merge"
+      },
+      "categoryMean": {
+        "shopping": [
+          51,
+          6042,
+          28018
+        ],
+        "transport": [
+          16,
+          2935,
+          14088
+        ],
+        "medical": [
+          5,
+          691,
+          3202
+        ],
+        "education_culture": [
+          9,
+          1235,
+          5926
+        ],
+        "entertainment_sports": [
+          6,
+          712,
+          3432
+        ],
+        "public_facility": [
+          6,
+          548,
+          2524
+        ]
+      },
+      "indexMean": [
+        0.416,
+        0.808,
+        0.921
+      ],
+      "ratingBreaks": {
+        "p20": 0.598,
+        "p40": 0.723,
+        "p60": 0.871,
+        "p80": 0.982
+      },
+      "debug": {
+        "bbox": [
+          118.36027451522598,
+          31.2317754765004,
+          119.22712776077523,
+          32.61068898149833
+        ],
+        "notes": "coordSysPoi=gcj02, gridKm=5, cellKm=1, rps=1, retry=5"
+      }
+    }
+  }
+}

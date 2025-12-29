@@ -31,7 +31,10 @@ export interface MatrixResponseShape {
 export interface IsochroneResult {
   data: FeatureCollection;
   isFallback: boolean;
-  error?: 'missing_key' | 'service_error';
+  error?: 'missing_key' | 'service_error' | 'limit' | 'auth';
+  status?: number;
+  statusText?: string;
+  responseText?: string;
 }
 
 export interface DirectionsStep {
@@ -116,7 +119,20 @@ export async function isochrones(params: IsochroneParams): Promise<IsochroneResu
     if (isAbortError(error)) {
       throw error;
     }
-    console.warn('[ors] isochrones fallback triggered', error);
+    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    const statusText = axios.isAxiosError(error) ? error.response?.statusText : undefined;
+    const responseText = axios.isAxiosError(error)
+      ? JSON.stringify(error.response?.data ?? '').slice(0, 300)
+      : undefined;
+    console.warn('[ors] isochrones fallback triggered', { status, statusText });
+    return {
+      data: localIsochrones(params),
+      isFallback: true,
+      error: status === 429 ? 'limit' : status === 401 || status === 403 ? 'auth' : 'service_error',
+      status,
+      statusText,
+      responseText
+    };
   }
 
   return {

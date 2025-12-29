@@ -40,7 +40,14 @@ type PoiFeature = Feature<Point, PoiProperties>;
 type ClusterFeature = Feature<Point, PoiProperties | ClusterProperties>;
 type PolygonFeature = Feature<Polygon, Record<string, unknown>>;
 type IsoPolygonFeature = Feature<Polygon | MultiPolygon, Record<string, unknown>>;
+type IsoPolygonInput = IsoPolygonFeature | null;
 type Bbox = [number, number, number, number];
+type CountGrid = {
+  cellSize: number;
+  minLng: number;
+  minLat: number;
+  cells: Map<string, RawPoint[]>;
+};
 type SiteCandidate = {
   lng: number;
   lat: number;
@@ -147,10 +154,13 @@ let coordConfig: CoordSysConfig = {
 };
 let groupPoints = new Map<string, RawPoint[]>();
 let groupIndexes = new Map<string, Supercluster<PoiProperties>>();
+let groupBboxes = new Map<string, Bbox>();
 let isoIndexes = new Map<string, Supercluster<PoiProperties>>();
+const countGrids = new Map<string, CountGrid>();
 let allIndex: Supercluster<PoiProperties> | null = null;
 let typeCounts: Record<string, number> = {};
 const COUNT_ZOOM = 15;
+const COUNT_GRID_CELL_DEG = 0.01;
 const SITE_DEFAULTS = {
   gridSpacingMeters: 400,
   maxCandidates: 800,
@@ -303,12 +313,23 @@ function addPoint(point: RawPoint) {
   }
   groupPoints.get(point.type_group)?.push(point);
   typeCounts[point.type_group] = (typeCounts[point.type_group] ?? 0) + 1;
+  const bbox = groupBboxes.get(point.type_group);
+  if (!bbox) {
+    groupBboxes.set(point.type_group, [point.lng, point.lat, point.lng, point.lat]);
+    return;
+  }
+  bbox[0] = Math.min(bbox[0], point.lng);
+  bbox[1] = Math.min(bbox[1], point.lat);
+  bbox[2] = Math.max(bbox[2], point.lng);
+  bbox[3] = Math.max(bbox[3], point.lat);
 }
 
 function buildPoints(rawData: unknown): void {
   groupPoints = new Map();
   groupIndexes.clear();
   isoIndexes.clear();
+  groupBboxes = new Map();
+  countGrids.clear();
   allIndex = null;
   typeCounts = {};
 
@@ -646,6 +667,118 @@ function buildIsoIndex(
   return inside;
 }
 
+function buildPolygonBboxes(polygons: IsoPolygonInput[]): Array<[number, number, number, number] | null> {
+  return polygons.map((polygon) => {
+    if (!polygon?.geometry) {
+      return null;
+    }
+    const geometry = polygon.geometry;
+    if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') {
+      return null;
+    }
+    return getPolygonBbox(geometry);
+  });
+}
+
+function buildCountGrid(points: RawPoint[]): CountGrid | null {
+  if (!points.length) {
+    return null;
+  }
+  let minLng = Infinity;
+  let minLat = Infinity;
+  points.forEach((point) => {
+    minLng = Math.min(minLng, point.lng);
+    minLat = Math.min(minLat, point.lat);
+  });
+  const cells = new Map<string, RawPoint[]>();
+  points.forEach((point) => {
+    const x = Math.floor((point.lng - minLng) / COUNT_GRID_CELL_DEG);
+    const y = Math.floor((point.lat - minLat) / COUNT_GRID_CELL_DEG);
+    const key = `${x}:${y}`;
+    if (!cells.has(key)) {
+      cells.set(key, []);
+    }
+    cells.get(key)?.push(point);
+  });
+  return { cellSize: COUNT_GRID_CELL_DEG, minLng, minLat, cells };
+}
+
+function queryCountGrid(grid: CountGrid, bbox: Bbox): RawPoint[] {
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  const x0 = Math.floor((minLng - grid.minLng) / grid.cellSize);
+  const y0 = Math.floor((minLat - grid.minLat) / grid.cellSize);
+  const x1 = Math.floor((maxLng - grid.minLng) / grid.cellSize);
+  const y1 = Math.floor((maxLat - grid.minLat) / grid.cellSize);
+  const results: RawPoint[] = [];
+  for (let x = x0; x <= x1; x += 1) {
+    for (let y = y0; y <= y1; y += 1) {
+      const key = `${x}:${y}`;
+      const bucket = grid.cells.get(key);
+      if (bucket?.length) {
+        results.push(...bucket);
+      }
+    }
+  }
+  return results;
+}
+
+function polygonCoversBbox(polygon: IsoPolygonInput, bbox: Bbox): boolean {
+  if (!polygon) {
+    return false;
+  }
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  const corners: Array<[number, number]> = [
+    [minLng, minLat],
+    [minLng, maxLat],
+    [maxLng, minLat],
+    [maxLng, maxLat]
+  ];
+  return corners.every((coord) => booleanPointInPolygon(coord, polygon as any));
+}
+
+function countPointsInPolygonsByGrid(
+  points: RawPoint[],
+  grid: CountGrid,
+  polygons: IsoPolygonInput[],
+  bboxes: Array<Bbox | null>,
+  groupBbox: Bbox
+): number[] {
+  return polygons.map((polygon, polygonIndex) => {
+    const bbox = bboxes[polygonIndex];
+    if (!polygon || !bbox) {
+      return 0;
+    }
+    const [minLng, minLat, maxLng, maxLat] = bbox;
+    if (
+      maxLng < groupBbox[0] ||
+      minLng > groupBbox[2] ||
+      maxLat < groupBbox[1] ||
+      minLat > groupBbox[3]
+    ) {
+      return 0;
+    }
+    if (polygonCoversBbox(polygon, groupBbox)) {
+      return points.length;
+    }
+    const candidates = queryCountGrid(grid, bbox);
+    let count = 0;
+    candidates.forEach((point) => {
+      if (
+        point.lng < minLng ||
+        point.lng > maxLng ||
+        point.lat < minLat ||
+        point.lat > maxLat
+      ) {
+        return;
+      }
+      if (booleanPointInPolygon([point.lng, point.lat], polygon as any)) {
+        count += 1;
+      }
+    });
+    return count;
+  });
+}
+
 function clearIsochrones() {
   isoIndexes.clear();
 }
@@ -721,6 +854,14 @@ type IncomingMessage =
         includeHull?: boolean;
         requestId: number;
         useIso?: boolean;
+      };
+    }
+  | {
+      type: 'COUNT_IN_POLYGONS';
+      payload: {
+        polygons: IsoPolygonInput[];
+        groups: string[];
+        requestId: number;
       };
     }
   | { type: 'EXPAND'; payload: { group: string; clusterId: number; requestId: number; useIso?: boolean } }
@@ -1028,6 +1169,43 @@ self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
           payload: { requestId, results }
         });
         logWorker('query_result', { requestId, groups: Object.keys(results).length, counts });
+        return;
+      }
+      case 'COUNT_IN_POLYGONS': {
+        const { polygons, groups, requestId } = message.payload;
+        const validGroups = groups.filter((group) => group && group !== 'address');
+        const bboxes = buildPolygonBboxes(polygons);
+        const counts: Record<string, number[]> = {};
+        validGroups.forEach((group) => {
+          const points = groupPoints.get(group) ?? [];
+          if (!points.length) {
+            counts[group] = polygons.map(() => 0);
+            return;
+          }
+          let grid = countGrids.get(group);
+          if (!grid) {
+            grid = buildCountGrid(points);
+            if (grid) {
+              countGrids.set(group, grid);
+            }
+          }
+          const groupBbox = groupBboxes.get(group);
+          if (!grid || !groupBbox) {
+            counts[group] = polygons.map(() => 0);
+            return;
+          }
+          counts[group] = countPointsInPolygonsByGrid(
+            points,
+            grid,
+            polygons,
+            bboxes,
+            groupBbox
+          );
+        });
+        self.postMessage({
+          type: 'POLYGON_COUNTS',
+          payload: { requestId, counts }
+        });
         return;
       }
       case 'EXPAND': {

@@ -70,6 +70,7 @@ interface UiState {
   isoListPageSize: number;
   isoListPage: number;
   isoPickArmed: boolean;
+  accessPickArmed: boolean;
   bboxPickArmed: boolean;
   mapHint: string | null;
   overlay: OverlayState | null;
@@ -152,6 +153,39 @@ interface RouteState {
   error?: string;
 }
 
+type AccessibilityLevel = '很高' | '高' | '中' | '低' | '很低';
+
+interface AccessibilityBaseline {
+  version: number;
+  city: string;
+  thresholdsMin: number[];
+  profile?: TravelProfile;
+  coreGroups: string[];
+  categoryMean: Record<string, number[]>;
+  indexMean: number[];
+  ratingBreaks: { p20: number; p40: number; p60: number; p80: number };
+}
+
+interface AccessibilityState {
+  active: boolean;
+  loading: boolean;
+  error?: string;
+  notice?: string;
+  origin?: { lng: number; lat: number };
+  profile: TravelProfile;
+  thresholdsMin: number[];
+  coreGroups: string[];
+  baseline?: AccessibilityBaseline;
+  baselineLoadedFromFile: boolean;
+  baselineProfileMatch: boolean;
+  counts?: Record<string, number[]>;
+  index?: number[];
+  cityIndex?: number[];
+  rating?: { level: AccessibilityLevel; score: number };
+  dirty: boolean;
+  isFallback: boolean;
+}
+
 type OverlayType = 'loading' | 'error' | 'info';
 
 interface OverlayState {
@@ -194,6 +228,42 @@ const INITIAL_WEIGHTS: SitingWeights = {
   accessibility: 1,
   density: 1,
   constraint: 1
+};
+
+const ACCESS_DEBUG =
+  import.meta.env.DEV && (import.meta.env.VITE_DEBUG_ACCESS as string | undefined) === '1';
+const ACCESS_WORKER_TIMEOUT_MS = 12 * 1000;
+const ACCESS_POI_WAIT_TIMEOUT_MS = 15 * 1000;
+const BASE_URL = (import.meta.env.BASE_URL as string | undefined) ?? '/';
+const ACCESS_BASELINE_URL = BASE_URL.endsWith('/')
+  ? `${BASE_URL}data/nanjing_access_baseline.json`
+  : `${BASE_URL}/data/nanjing_access_baseline.json`;
+
+const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000;
+const ACCESS_CORE_GROUPS = [
+  'shopping',
+  'transport',
+  'medical',
+  'education_culture',
+  'entertainment_sports',
+  'public_facility'
+];
+const ACCESS_BASELINE_FALLBACK: AccessibilityBaseline = {
+  version: 1,
+  city: '南京市',
+  thresholdsMin: [1, 15, 30, 45, 60],
+  profile: 'foot-walking',
+  coreGroups: ACCESS_CORE_GROUPS,
+  categoryMean: {
+    shopping: [20, 1430, 2800, 4000, 5000],
+    transport: [15, 1030, 2060, 3100, 4000],
+    medical: [3, 200, 470, 700, 930],
+    education_culture: [4, 266, 600, 860, 1130],
+    entertainment_sports: [5, 316, 700, 1010, 1300],
+    public_facility: [3, 163, 366, 550, 733]
+  },
+  indexMean: [0.9, 1.0, 1.08, 1.15, 1.2],
+  ratingBreaks: { p20: 0.85, p40: 1.0, p60: 1.15, p80: 1.3 }
 };
 
 export const useAppStore = defineStore('app', () => {
@@ -241,6 +311,7 @@ export const useAppStore = defineStore('app', () => {
     isoListPageSize: 200,
     isoListPage: 1,
     isoPickArmed: false,
+    accessPickArmed: false,
     bboxPickArmed: false,
     mapHint: null,
     overlay: null,
@@ -300,6 +371,26 @@ export const useAppStore = defineStore('app', () => {
     summary: undefined,
     steps: undefined,
     error: undefined
+  });
+
+  const accessibility = ref<AccessibilityState>({
+    active: false,
+    loading: false,
+    error: undefined,
+    notice: undefined,
+    origin: undefined,
+    profile: 'foot-walking',
+    thresholdsMin: ACCESS_BASELINE_FALLBACK.thresholdsMin,
+    coreGroups: ACCESS_CORE_GROUPS,
+    baseline: undefined,
+    baselineLoadedFromFile: false,
+    baselineProfileMatch: true,
+    counts: undefined,
+    index: undefined,
+    cityIndex: undefined,
+    rating: undefined,
+    dirty: false,
+    isFallback: false
   });
 
   const nanjingBounds = computed(() => bboxOfNanjing());
@@ -427,6 +518,33 @@ export const useAppStore = defineStore('app', () => {
     return `${year}${month}${day}`;
   };
   const sanitizeFileName = (value: string) => value.replace(/[\\/:*?"<>|]/g, '-');
+  const clamp = (value: number, min: number, max: number) =>
+    Math.min(max, Math.max(min, value));
+  const resolveRatingLevel = (score: number, breaks: AccessibilityBaseline['ratingBreaks']) => {
+    if (score >= breaks.p80) return '很高';
+    if (score >= breaks.p60) return '高';
+    if (score >= breaks.p40) return '中';
+    if (score >= breaks.p20) return '低';
+    return '很低';
+  };
+  const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const logAccess = (step: string, detail?: Record<string, unknown>) => {
+    if (!ACCESS_DEBUG) return;
+    console.info('[ACC]', step, detail ?? {});
+  };
+  const warnAccess = (step: string, detail?: Record<string, unknown>) => {
+    if (!ACCESS_DEBUG) return;
+    console.warn('[ACC]', step, detail ?? {});
+  };
+  const errorAccess = (step: string, detail?: Record<string, unknown>, error?: unknown) => {
+    console.error('[ACC]', step, detail ?? {}, error ?? '');
+  };
+  const formatAccessError = (code: string, detail?: string) => {
+    if (import.meta.env.DEV) {
+      return `可达性评估失败（${code}${detail ? `: ${detail}` : ''}）`;
+    }
+    return '可达性评估失败，请稍后重试';
+  };
   const POI_LOADING_MESSAGE = '正在加载 POI 数据...';
   let poiLoadingOverlayActive = false;
   let poiReadyPromise: Promise<void> | null = null;
@@ -436,8 +554,24 @@ export const useAppStore = defineStore('app', () => {
   let bboxStatsRequestId = 0;
   let siteSelectRequestId = 0;
   let geocodeRequestId = 0;
+  let accessibilityEvalRequestId = 0;
+  let accessibilityCountRequestId = 0;
   const pendingExpand = new Map<number, (zoom: number | null) => void>();
+  const pendingAccessibility = new Map<number, (counts: Record<string, number[]>) => void>();
   const isoIndexedGroups = new Set<string>();
+  const accessibilityCache = new Map<
+    string,
+    {
+      ts: number;
+      counts: Record<string, number[]>;
+      index: number[];
+      cityIndex: number[];
+      rating: { level: AccessibilityLevel; score: number };
+      isFallback: boolean;
+    }
+  >();
+  let accessibilityBaselineRaw: unknown | null = null;
+  let accessibilityBaselineLoadedFromFile = false;
 
   function extractViewportPoints(
     grouped: Record<string, FeatureCollection<Point, Record<string, unknown>>>
@@ -562,26 +696,42 @@ export const useAppStore = defineStore('app', () => {
 
   function armIsoPick() {
     cancelBboxPick();
+    cancelAccessibilityPick();
     ui.value.isoPickArmed = true;
     ui.value.mapHint = '请点击任意位置生成等时圈';
   }
 
   function cancelIsoPick() {
     ui.value.isoPickArmed = false;
-    if (!ui.value.bboxPickArmed) {
+    if (!ui.value.bboxPickArmed && !ui.value.accessPickArmed) {
+      ui.value.mapHint = null;
+    }
+  }
+
+  function armAccessibilityPick() {
+    cancelIsoPick();
+    cancelBboxPick();
+    ui.value.accessPickArmed = true;
+    ui.value.mapHint = '请点击地图选择评估起点';
+  }
+
+  function cancelAccessibilityPick() {
+    ui.value.accessPickArmed = false;
+    if (!ui.value.isoPickArmed && !ui.value.bboxPickArmed) {
       ui.value.mapHint = null;
     }
   }
 
   function armBboxPick() {
     cancelIsoPick();
+    cancelAccessibilityPick();
     ui.value.bboxPickArmed = true;
     ui.value.mapHint = '拖拽框选分析范围（ESC/取消 退出）';
   }
 
   function cancelBboxPick() {
     ui.value.bboxPickArmed = false;
-    if (!ui.value.isoPickArmed) {
+    if (!ui.value.isoPickArmed && !ui.value.accessPickArmed) {
       ui.value.mapHint = null;
     }
   }
@@ -590,7 +740,13 @@ export const useAppStore = defineStore('app', () => {
 
   const rightTabHasContent = (tab: RightTab) => {
     if (tab === 'iso') {
-      return Boolean(analysis.value.isochrone || route.value.active || route.value.loading);
+      return Boolean(
+        analysis.value.isochrone ||
+          route.value.active ||
+          route.value.loading ||
+          accessibility.value.active ||
+          accessibility.value.loading
+      );
     }
     return Boolean(
       siteEngine.value.results.length ||
@@ -884,6 +1040,530 @@ export const useAppStore = defineStore('app', () => {
     ui.value.isoListPage += 1;
   }
 
+  function normalizeBaseline(raw: unknown): AccessibilityBaseline {
+    if (!raw || typeof raw !== 'object') {
+      return ACCESS_BASELINE_FALLBACK;
+    }
+    const data = raw as AccessibilityBaseline;
+  const thresholds = Array.isArray(data.thresholdsMin)
+    ? data.thresholdsMin.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+    : [];
+  const filtered = data.profile === 'driving-car' ? thresholds.filter((value) => value <= 30) : thresholds;
+  if (!filtered.length) {
+    return ACCESS_BASELINE_FALLBACK;
+  }
+  const coreGroups = Array.isArray(data.coreGroups) && data.coreGroups.length
+    ? data.coreGroups.map((value) => String(value))
+    : ACCESS_CORE_GROUPS;
+  const categoryMean: Record<string, number[]> = {};
+  coreGroups.forEach((group) => {
+    const values = (data.categoryMean as Record<string, number[]> | undefined)?.[group];
+    if (Array.isArray(values) && values.length >= filtered.length) {
+      categoryMean[group] = values.slice(0, filtered.length).map((value) => Number(value));
+    } else {
+      categoryMean[group] = new Array(filtered.length).fill(0);
+    }
+  });
+  const indexMean = Array.isArray(data.indexMean) && data.indexMean.length >= filtered.length
+    ? data.indexMean.slice(0, filtered.length).map((value) => Number(value))
+    : new Array(filtered.length).fill(1);
+  const ratingBreaks = data.ratingBreaks ?? ACCESS_BASELINE_FALLBACK.ratingBreaks;
+  return {
+    version: Number.isFinite(Number(data.version)) ? Number(data.version) : 1,
+    city: data.city ? String(data.city) : ACCESS_BASELINE_FALLBACK.city,
+    thresholdsMin: filtered,
+      profile: data.profile,
+      coreGroups,
+      categoryMean,
+      indexMean,
+      ratingBreaks: {
+        p20: Number(ratingBreaks.p20 ?? ACCESS_BASELINE_FALLBACK.ratingBreaks.p20),
+        p40: Number(ratingBreaks.p40 ?? ACCESS_BASELINE_FALLBACK.ratingBreaks.p40),
+        p60: Number(ratingBreaks.p60 ?? ACCESS_BASELINE_FALLBACK.ratingBreaks.p60),
+        p80: Number(ratingBreaks.p80 ?? ACCESS_BASELINE_FALLBACK.ratingBreaks.p80)
+      }
+    };
+  }
+
+  function resolveBaselineForProfile(
+    raw: unknown,
+    profile: TravelProfile
+  ): { baseline: AccessibilityBaseline; profileMatch: boolean } {
+    if (!raw || typeof raw !== 'object') {
+      return { baseline: ACCESS_BASELINE_FALLBACK, profileMatch: profile === 'foot-walking' };
+    }
+    const rawObj = raw as Record<string, unknown>;
+    const byProfile = rawObj.byProfile;
+    if (byProfile && typeof byProfile === 'object') {
+      const candidate = (byProfile as Record<string, unknown>)[profile];
+      if (candidate) {
+        const baseline = normalizeBaseline(candidate);
+        baseline.profile = profile;
+        return { baseline, profileMatch: true };
+      }
+    }
+    const baseline = normalizeBaseline(raw);
+    const match = !baseline.profile || baseline.profile === profile;
+    return { baseline, profileMatch: match };
+  }
+
+  async function loadAccessibilityBaseline() {
+    if (accessibilityBaselineRaw) {
+      logAccess('S2_baseline_cached');
+      return accessibilityBaselineRaw;
+    }
+    try {
+      logAccess('S2_baseline_start', { url: ACCESS_BASELINE_URL });
+      const response = await fetch(ACCESS_BASELINE_URL, { cache: 'no-cache' });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const raw = await response.json();
+      accessibilityBaselineRaw = raw;
+      accessibilityBaselineLoadedFromFile = true;
+      logAccess('S2_baseline_done', { profile: (raw as any)?.profile ?? null });
+    } catch (error) {
+      errorAccess(
+        'S2_baseline_failed',
+        { reason: error instanceof Error ? error.message : 'unknown' },
+        error
+      );
+      warnAccess('S2_baseline_fallback');
+      accessibilityBaselineRaw = ACCESS_BASELINE_FALLBACK;
+      accessibilityBaselineLoadedFromFile = false;
+    }
+    return accessibilityBaselineRaw;
+  }
+
+  function waitForPoiReady(): Promise<boolean> {
+    if (poiEngine.value.ready) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const stop = watch(
+        () => [poiEngine.value.ready, poiEngine.value.error],
+        ([ready, error]) => {
+          if (!ready && !error) {
+            return;
+          }
+          stop();
+          resolve(Boolean(ready && !error));
+        },
+        { immediate: true }
+      );
+    });
+  }
+
+  function waitForPoiStableIndex(timeoutMs = ACCESS_POI_WAIT_TIMEOUT_MS): Promise<boolean> {
+    if (!poiEngine.value.buildingIndex) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const startedAt = nowMs();
+      const timer = window.setTimeout(() => {
+        stop();
+        resolve(false);
+      }, timeoutMs);
+      const stop = watch(
+        () => [poiEngine.value.buildingIndex, poiEngine.value.indexReady],
+        ([building, indexReady]) => {
+          if (!building && (indexReady || !poiEngine.value.selectedGroups.length)) {
+            window.clearTimeout(timer);
+            stop();
+            resolve(true);
+            return;
+          }
+          if (nowMs() - startedAt > timeoutMs) {
+            window.clearTimeout(timer);
+            stop();
+            resolve(false);
+          }
+        },
+        { immediate: true }
+      );
+    });
+  }
+
+  function computeAccessibilityIndex(
+    counts: Record<string, number[]>,
+    baseline: AccessibilityBaseline
+  ): number[] {
+    const thresholds = baseline.thresholdsMin;
+    return thresholds.map((_, idx) => {
+      let sum = 0;
+      let groupCount = 0;
+      baseline.coreGroups.forEach((group) => {
+        const groupCounts = counts[group] ?? [];
+        const value = Number(groupCounts[idx] ?? 0);
+        const baseValue = Number(baseline.categoryMean[group]?.[idx] ?? 0);
+        const denom = Math.log1p(baseValue + 1);
+        const norm = denom > 0 ? Math.log1p(value) / denom : 0;
+        sum += clamp(norm, 0, 2);
+        groupCount += 1;
+      });
+      return groupCount ? sum / groupCount : 0;
+    });
+  }
+
+  function computeCompositeScore(values: number[], thresholds: number[]): number {
+    const length = Math.min(values.length, thresholds.length);
+    if (length <= 0) {
+      return 0;
+    }
+    if (length === 1) {
+      return values[0] ?? 0;
+    }
+    let weighted = 0;
+    let weightSum = 0;
+    for (let i = 0; i < length - 1; i += 1) {
+      const t0 = thresholds[i] ?? 0;
+      const t1 = thresholds[i + 1] ?? t0;
+      const span = Math.max(1, t1 - t0);
+      const v0 = values[i] ?? 0;
+      const v1 = values[i + 1] ?? v0;
+      weighted += ((v0 + v1) / 2) * span;
+      weightSum += span;
+    }
+    return weightSum ? weighted / weightSum : values[0] ?? 0;
+  }
+
+  function buildRating(
+    index: number[],
+    thresholds: number[],
+    baseline: AccessibilityBaseline
+  ): { level: AccessibilityLevel; score: number } {
+    const score = computeCompositeScore(index, thresholds);
+    return {
+      level: resolveRatingLevel(score, baseline.ratingBreaks),
+      score
+    };
+  }
+
+  function buildAccessibilityCacheKey(
+    origin: { lng: number; lat: number },
+    profile: TravelProfile,
+    thresholds: number[]
+  ) {
+    return `${profile}|${origin.lng.toFixed(5)},${origin.lat.toFixed(5)}|${thresholds.join(',')}`;
+  }
+
+  function requestPolygonCounts(
+    polygons: Array<Feature<Polygon | MultiPolygon> | null>,
+    groups: string[]
+  ): Promise<Record<string, number[]>> {
+    if (!poiWorker) {
+      return Promise.reject(new Error('WorkerNotReady'));
+    }
+    accessibilityCountRequestId += 1;
+    const requestId = accessibilityCountRequestId;
+    const startedAt = nowMs();
+    const groupsPlain = toPlainGroups(groups);
+    const polygonsPlain = polygons.map((polygon) =>
+      polygon ? toPlainFeature(polygon) : null
+    );
+    logAccess('S5_worker_post', {
+      requestId,
+      groups: groupsPlain.length,
+      polygons: polygonsPlain.length
+    });
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        pendingAccessibility.delete(requestId);
+        warnAccess('S5_worker_timeout', {
+          requestId,
+          timeoutMs: ACCESS_WORKER_TIMEOUT_MS
+        });
+        reject(new Error('WorkerTimeout'));
+      }, ACCESS_WORKER_TIMEOUT_MS);
+      pendingAccessibility.set(requestId, (counts) => {
+        window.clearTimeout(timer);
+        logAccess('S5_worker_done', {
+          requestId,
+          tookMs: Math.round(nowMs() - startedAt),
+          keys: Object.keys(counts ?? {})
+        });
+        resolve(counts);
+      });
+      poiWorker?.postMessage({
+        type: 'COUNT_IN_POLYGONS',
+        payload: {
+          polygons: polygonsPlain,
+          groups: groupsPlain,
+          requestId
+        }
+      });
+    });
+  }
+
+  function clearAccessibility() {
+    accessibility.value.active = false;
+    accessibility.value.loading = false;
+    accessibility.value.error = undefined;
+    accessibility.value.notice = undefined;
+    accessibility.value.origin = undefined;
+    accessibility.value.profile = filters.value.travelMode;
+    accessibility.value.thresholdsMin =
+      accessibility.value.baseline?.thresholdsMin ?? ACCESS_BASELINE_FALLBACK.thresholdsMin;
+    accessibility.value.coreGroups =
+      accessibility.value.baseline?.coreGroups ?? ACCESS_CORE_GROUPS;
+    accessibility.value.counts = undefined;
+    accessibility.value.index = undefined;
+    accessibility.value.cityIndex = undefined;
+    accessibility.value.rating = undefined;
+    accessibility.value.dirty = false;
+    accessibility.value.isFallback = false;
+    accessibility.value.baselineProfileMatch = true;
+    cancelAccessibilityPick();
+  }
+
+  async function evaluateAccessibilityAtOrigin(
+    origin?: { lng: number; lat: number },
+    profile?: TravelProfile
+  ) {
+    const evalStartedAt = nowMs();
+    logAccess('S1_start', {
+      origin,
+      profile: profile ?? filters.value.travelMode
+    });
+    const targetOrigin =
+      origin ?? isoEngine.value.origin ?? iso.value.origin ?? accessibility.value.origin;
+    if (!targetOrigin) {
+      warnAccess('S1_missing_origin');
+      showInfo('请先在地图上选择评估起点');
+      return;
+    }
+    accessibility.value.origin = { ...targetOrigin };
+    accessibility.value.profile = profile ?? filters.value.travelMode;
+    accessibility.value.loading = true;
+    accessibility.value.error = undefined;
+    accessibility.value.notice = undefined;
+    accessibility.value.isFallback = false;
+    accessibility.value.active = true;
+    accessibility.value.dirty = false;
+
+    if (!poiEngine.value.ready) {
+      logAccess('S1_poi_init');
+      initPoiEngine({ showOverlay: false });
+      const ready = await waitForPoiReady();
+      if (!ready) {
+        accessibility.value.loading = false;
+        accessibility.value.error = formatAccessError('P1', 'POI_NOT_READY');
+        errorAccess('S1_poi_not_ready');
+        return;
+      }
+    }
+    const poiStable = await waitForPoiStableIndex();
+    if (!poiStable) {
+      accessibility.value.loading = false;
+      accessibility.value.error = formatAccessError('P2', 'POI_INDEX_TIMEOUT');
+      errorAccess('S1_poi_index_timeout');
+      return;
+    }
+    logAccess('S1_done', { tookMs: Math.round(nowMs() - evalStartedAt) });
+
+    const baselineRaw = await loadAccessibilityBaseline();
+    const resolved = resolveBaselineForProfile(baselineRaw, accessibility.value.profile);
+    const baseline = resolved.baseline;
+    const rawThresholds = baseline.thresholdsMin;
+    const thresholdsMin =
+      accessibility.value.profile === 'driving-car'
+        ? rawThresholds.filter((value) => value <= 30)
+        : rawThresholds;
+    if (!thresholdsMin.length) {
+      accessibility.value.loading = false;
+      accessibility.value.error = formatAccessError('A2', 'NO_THRESHOLDS');
+      errorAccess('S2_no_thresholds');
+      return;
+    }
+    accessibility.value.baseline = baseline;
+    accessibility.value.baselineLoadedFromFile = accessibilityBaselineLoadedFromFile;
+    accessibility.value.baselineProfileMatch = resolved.profileMatch;
+    if (!resolved.profileMatch) {
+      const readable =
+        baseline.profile === 'driving-car'
+          ? '驾车'
+          : baseline.profile === 'cycling-regular'
+            ? '骑行'
+            : '步行';
+      accessibility.value.notice = `当前出行方式无城市基线，已使用${readable}基线（仅供参考）`;
+    }
+    if (!accessibility.value.baselineLoadedFromFile) {
+      accessibility.value.notice =
+        accessibility.value.notice ?? '城市基线读取失败，已使用内置基线（仅供参考）';
+    }
+    accessibility.value.thresholdsMin = thresholdsMin;
+    accessibility.value.coreGroups = baseline.coreGroups;
+    const cacheKey = buildAccessibilityCacheKey(
+      targetOrigin,
+      accessibility.value.profile,
+      thresholdsMin
+    );
+    const cached = accessibilityCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && now - cached.ts < ACCESS_CACHE_TTL_MS) {
+      logAccess('S2_cache_hit', { cacheKey });
+      accessibility.value.counts = cached.counts;
+      accessibility.value.index = cached.index;
+      accessibility.value.cityIndex = cached.cityIndex;
+      accessibility.value.rating = cached.rating;
+      accessibility.value.isFallback = cached.isFallback;
+      accessibility.value.loading = false;
+      return;
+    }
+
+    const thresholdsSec = thresholdsMin.map((value) => value * 60);
+    if (accessibilityAbort) {
+      accessibilityAbort.abort();
+    }
+    const controller = new AbortController();
+    accessibilityAbort = controller;
+    const requestId = ++accessibilityEvalRequestId;
+
+      try {
+        const [lonWgs, latWgs] = toWgs84([targetOrigin.lng, targetOrigin.lat]);
+        logAccess('S3_ors_start', {
+          requestId,
+          profile: accessibility.value.profile,
+          originWgs: [Number(lonWgs.toFixed(6)), Number(latWgs.toFixed(6))],
+          rangesSec: thresholdsSec
+        });
+        const orsStartedAt = nowMs();
+        const result = await fetchIsochrones({
+          lon: lonWgs,
+          lat: latWgs,
+          profile: accessibility.value.profile,
+          ranges: thresholdsSec,
+          signal: controller.signal
+        });
+        if (requestId !== accessibilityEvalRequestId) {
+          return;
+        }
+        logAccess('S3_ors_done', {
+          requestId,
+          tookMs: Math.round(nowMs() - orsStartedAt),
+          isFallback: result.isFallback,
+          error: result.error,
+          status: result.status
+        });
+        if (result.isFallback) {
+          warnAccess('S3_ors_fallback', {
+            requestId,
+            error: result.error,
+            status: result.status,
+            statusText: result.statusText,
+            responseText: result.responseText
+          });
+        }
+        accessibility.value.isFallback = result.isFallback;
+        logAccess('S4_polygons_start', { requestId });
+        const s4StartedAt = nowMs();
+        const geojson = transformGeoJSON(result.data, (coord) => toMapCoord(coord));
+        if (
+          !geojson ||
+          geojson.type !== 'FeatureCollection' ||
+          !Array.isArray(geojson.features)
+        ) {
+          accessibility.value.loading = false;
+          accessibility.value.error = formatAccessError('A4', 'ISO_INVALID');
+          errorAccess('S4_invalid_geojson', { requestId });
+          return;
+        }
+        const featureMap = new Map<number, Feature<Polygon | MultiPolygon>>();
+        const featureList: Array<{
+          feature: Feature<Polygon | MultiPolygon>;
+          value: number | null;
+        }> = [];
+        geojson.features.forEach((feature) => {
+          if (!feature.geometry) return;
+          if (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon') {
+            return;
+          }
+          const props = feature.properties as Record<string, unknown> | null | undefined;
+          const rawValue = props?.value ?? props?.contour ?? props?.bucket;
+          const value = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+          if (Number.isFinite(value)) {
+            featureMap.set(value, feature as Feature<Polygon | MultiPolygon>);
+          }
+          featureList.push({
+            feature: feature as Feature<Polygon | MultiPolygon>,
+            value: Number.isFinite(value) ? value : null
+          });
+        });
+        const fallbackFeatures = featureList
+          .slice()
+          .sort((a, b) => {
+            const av = a.value ?? Number.POSITIVE_INFINITY;
+            const bv = b.value ?? Number.POSITIVE_INFINITY;
+            return av - bv;
+          })
+          .map((item) => item.feature);
+        const polygons = thresholdsSec.map((range, index) => {
+          const feature =
+            featureMap.get(range) ??
+            featureMap.get(range / 60) ??
+            fallbackFeatures[index];
+          return feature ? toPlainFeature(feature) : null;
+        });
+        logAccess('S4_polygons_done', {
+          requestId,
+          tookMs: Math.round(nowMs() - s4StartedAt),
+          features: geojson.features.length,
+          matched: polygons.filter(Boolean).length,
+          thresholds: thresholdsSec.length
+        });
+        if (polygons.every((item) => !item)) {
+          accessibility.value.loading = false;
+          accessibility.value.error = formatAccessError('A5', 'POLYGON_EMPTY');
+          errorAccess('S4_empty_polygons', { requestId });
+          return;
+        }
+        const counts = await requestPolygonCounts(polygons, baseline.coreGroups);
+        if (requestId !== accessibilityEvalRequestId) {
+          return;
+        }
+        logAccess('S6_index_start', { requestId });
+        const s6StartedAt = nowMs();
+        const index = computeAccessibilityIndex(counts, baseline);
+        const cityIndex = accessibility.value.baselineProfileMatch
+          ? baseline.indexMean.length === index.length
+            ? baseline.indexMean
+            : computeAccessibilityIndex(baseline.categoryMean, baseline)
+          : undefined;
+        const rating = buildRating(index, thresholdsMin, baseline);
+        logAccess('S6_done', {
+          requestId,
+          tookMs: Math.round(nowMs() - s6StartedAt),
+          rating: rating.level,
+          score: Number(rating.score.toFixed(3))
+        });
+        accessibility.value.counts = counts;
+        accessibility.value.index = index;
+        accessibility.value.cityIndex = cityIndex;
+        accessibility.value.rating = rating;
+        accessibility.value.loading = false;
+        accessibility.value.error = result.isFallback
+          ? '当前为近似评估（ORS 不可用）'
+          : undefined;
+      accessibilityCache.set(cacheKey, {
+        ts: Date.now(),
+        counts,
+        index,
+        cityIndex,
+        rating,
+        isFallback: result.isFallback
+        });
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        accessibility.value.loading = false;
+        const reason =
+          error instanceof Error ? error.message : typeof error === 'string' ? error : 'UNKNOWN';
+        const code = reason === 'WorkerTimeout' ? 'W1' : reason === 'WorkerNotReady' ? 'W2' : 'A9';
+        accessibility.value.error = formatAccessError(code, reason);
+        errorAccess('S6_failed', { requestId, reason }, error);
+      }
+    }
   function initPoiEngine(options: { showOverlay?: boolean } = {}) {
     if (poiWorker) {
       if (options.showOverlay && !poiEngine.value.ready) {
@@ -1080,6 +1760,16 @@ export const useAppStore = defineStore('app', () => {
         }
         return;
       }
+        if (type === 'POLYGON_COUNTS') {
+          const resolver = pendingAccessibility.get(payload.requestId);
+          if (resolver) {
+            resolver(payload?.counts ?? {});
+            pendingAccessibility.delete(payload.requestId);
+          } else {
+            warnAccess('S5_worker_orphan', { requestId: payload.requestId });
+          }
+          return;
+        }
       if (type === 'ERROR') {
         const sourceType = String(payload?.sourceType ?? 'UNKNOWN');
         const message = payload?.message ?? 'POI 引擎错误';
@@ -1376,6 +2066,10 @@ export const useAppStore = defineStore('app', () => {
     if (iso.value.origin && (isoEngine.value.active || iso.value.active)) {
       iso.value.dirty = true;
     }
+    if (accessibility.value.active) {
+      accessibility.value.profile = mode;
+      accessibility.value.dirty = true;
+    }
     abortIsochroneRequest();
   }
 
@@ -1394,6 +2088,7 @@ export const useAppStore = defineStore('app', () => {
   >();
   let isochroneAbort: AbortController | null = null;
   let isochroneRequestId = 0;
+  let accessibilityAbort: AbortController | null = null;
 
   const routeCache = new Map<
     string,
@@ -1422,6 +2117,9 @@ export const useAppStore = defineStore('app', () => {
     isoEngine.value.origin = { lng, lat };
     if (iso.value.active) {
       iso.value.dirty = true;
+    }
+    if (accessibility.value.active) {
+      accessibility.value.dirty = true;
     }
   }
 
@@ -1939,12 +2637,14 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     map,
+    mapCoordSys: MAP_COORD_SYS,
     filters,
     data,
     ui,
     iso,
     isoEngine,
     route,
+    accessibility,
     poiEngine,
     analysis,
     siteEngine,
@@ -1964,6 +2664,8 @@ export const useAppStore = defineStore('app', () => {
     hideOverlay,
     armIsoPick,
     cancelIsoPick,
+    armAccessibilityPick,
+    cancelAccessibilityPick,
     armBboxPick,
     cancelBboxPick,
     setRightTab,
@@ -1993,6 +2695,9 @@ export const useAppStore = defineStore('app', () => {
     setActiveIsoGroup,
     ensureActiveIsoGroup,
     loadMoreIsoPois,
+    loadAccessibilityBaseline,
+    evaluateAccessibilityAtOrigin,
+    clearAccessibility,
     clearRoute,
     clearIsochrones,
     resetIsochrone
