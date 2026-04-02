@@ -35,11 +35,11 @@ npm run preview
 - 推荐安装：`npm ci`（锁定版本）；如需更新依赖可用 `npm install`。
 - 迁移正确姿势：不要拷贝 `node_modules`，在新机器执行 `npm run reinstall`。
 - 清理缓存：`npm run clean` 清理构建/缓存；`npm run reset` 清理缓存并删除 `node_modules`。
-- 个人覆盖：如需自定义 Key 或参数，请创建 `.env.local`（不进 git）。
+- 个人覆盖：如需自定义 Key 或参数，请创建 `.env.local`。
 
 ## 环境变量说明
 
-本仓库已跟踪 `.env`，如需个人覆盖请使用 `.env.local`（不进 git，优先级高于 `.env`）。
+本仓库已跟踪 `.env`，如需个人覆盖请使用 `.env.local`。
 
 | 变量 | 必填 | 说明 | 示例 |
 | --- | --- | --- | --- |
@@ -61,11 +61,11 @@ npm run preview
 
 ## 数据文件说明（public/data）
 
-- `nanjing_poi.json`：南京 POI 大数据（体积大，默认不进 git，需自行放置或改 `VITE_POI_URL`）。
-- `nanjing_access_baseline.json`：可达性 baseline（仓库已跟踪，用于评估卡）。
+- `nanjing_poi.json`：南京 POI 大数据（体积较大，需自行放置或改 `VITE_POI_URL`）。
+- `nanjing_access_baseline.json`：可达性 baseline。
 - `type.xlsx`：POI 类型字典（用于 `npm run type:report`）。
-- `type_rules.generated.json`：POI 分类规则（已跟踪，缺失会回退内置规则）。
-- 生成/缓存但不跟踪：`cache/`、`public/data/nanjing_access_baseline.report.json`、`public/data/type_coverage_report.md`。
+- `type_rules.generated.json`：POI 分类规则。
+- 生成/缓存：`cache/`、`public/data/nanjing_access_baseline.report.json`、`public/data/type_coverage_report.md`。
 
 ## 常见问题排查
 
@@ -157,7 +157,7 @@ npm run preview
 ## 版本与更新时间
 
 - 版本：0.1.0
-- 最后更新时间：2025-12-29
+- 最后更新时间：2026-4-2
 
 ## 致谢 / 数据来源 / 免责声明
 
